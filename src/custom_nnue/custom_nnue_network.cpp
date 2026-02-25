@@ -35,6 +35,7 @@ constexpr std::uint32_t kExpectedPosH2       = 16;
 constexpr std::uint32_t kExpectedPsqtH3      = 32;
 constexpr std::uint32_t kExpectedPosH3       = 32;
 constexpr std::uint32_t kExpectedOutputs     = 2;
+constexpr std::size_t   kMaxActiveFeatures   = 33;  // 32 pieces + side-to-move bit
 
 constexpr std::uint32_t kExpectedFeatureVariantId = 2;
 constexpr std::uint32_t kExpectedBucketSchemeId   = 1;
@@ -415,10 +416,12 @@ struct BucketLayers {
 
 struct EncodedFen {
     std::array<float, kExpectedInputSize> features{};
-    int                                   pieceCount = 0;
-    int                                   stmBlack   = 0;
-    int                                   bucket8    = 0;
-    int                                   bucket16   = 0;
+    std::array<std::uint16_t, kMaxActiveFeatures> activeFeatureIndices{};
+    std::uint16_t                                 activeFeatureCount = 0;
+    int                                           pieceCount         = 0;
+    int                                           stmBlack           = 0;
+    int                                           bucket8            = 0;
+    int                                           bucket16           = 0;
 };
 
 int piece_index_no_pawn(char p) {
@@ -459,6 +462,7 @@ int piece_index_all(char p) {
     }
 }
 
+bool add_active_feature(EncodedFen& enc, int featureIndex);
 [[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err);
 bool encode_position_v2(const Position& pos, EncodedFen& out);
 bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
@@ -780,7 +784,14 @@ namespace {
             const bool isBlack = std::islower(uch) != 0;
             const int  idx     = isEdgeRank ? piece_index_no_pawn(p) : piece_index_all(p);
             if (idx >= 0)
-                out.features[offset + std::size_t((isBlack ? nTypes : 0) + idx)] = 1.0f;
+            {
+                const int featureIndex = static_cast<int>(offset) + (isBlack ? nTypes : 0) + idx;
+                if (!add_active_feature(out, featureIndex))
+                {
+                    err = "Invalid FEN feature encoding";
+                    return false;
+                }
+            }
 
             ++fileIdx;
             ++out.pieceCount;
@@ -810,8 +821,12 @@ namespace {
         return false;
     }
 
-    out.stmBlack      = side[0] == 'b' ? 1 : 0;
-    out.features[736] = out.stmBlack ? 1.0f : 0.0f;
+    out.stmBlack = side[0] == 'b' ? 1 : 0;
+    if (out.stmBlack && !add_active_feature(out, 736))
+    {
+        err = "Invalid FEN stm feature encoding";
+        return false;
+    }
     out.bucket8       = std::clamp((std::max(out.pieceCount, 1) - 1) / 4, 0, 7);
     out.bucket16      = out.bucket8 * 2 + out.stmBlack;
     return true;
@@ -884,6 +899,18 @@ bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Networ
 void fill_bucket_fields(int pieceCount, int stmBlack, int& bucket8, int& bucket16) {
     bucket8  = std::clamp((std::max(pieceCount, 1) - 1) / 4, 0, 7);
     bucket16 = bucket8 * 2 + stmBlack;
+}
+
+bool add_active_feature(EncodedFen& enc, int featureIndex) {
+    if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
+        return false;
+
+    enc.features[std::size_t(featureIndex)] = 1.0f;
+    if (enc.activeFeatureCount >= enc.activeFeatureIndices.size())
+        return false;
+
+    enc.activeFeatureIndices[enc.activeFeatureCount++] = static_cast<std::uint16_t>(featureIndex);
+    return true;
 }
 
 struct SquareFeatureGeom {
@@ -984,7 +1011,8 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
             int featureIndex = -1;
             if (feature_index_for_piece_square(pc, sq, featureIndex))
             {
-                out.features[std::size_t(featureIndex)] = 1.0f;
+                if (!add_active_feature(out, featureIndex))
+                    return false;
                 continue;
             }
 
@@ -997,8 +1025,9 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
         }
     }
 
-    out.stmBlack      = pos.side_to_move() == BLACK ? 1 : 0;
-    out.features[736] = out.stmBlack ? 1.0f : 0.0f;
+    out.stmBlack = pos.side_to_move() == BLACK ? 1 : 0;
+    if (out.stmBlack && !add_active_feature(out, 736))
+        return false;
     fill_bucket_fields(out.pieceCount, out.stmBlack, out.bucket8, out.bucket16);
     return true;
 }
@@ -1044,41 +1073,46 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     const auto& psqtB = impl.psqtBuckets[std::size_t(state.bucket16)];
     const auto& posB  = impl.positionalBuckets[std::size_t(state.bucket16)];
 
-    for (std::size_t j = 0; j < kExpectedPsqtH2; ++j)
-    {
-        float sum = psqtB.h2Bias[j];
-        for (std::size_t i = 0; i < kExpectedH1Psqt; ++i)
-            sum += state.h1Clip[i] * psqtB.h2Weight[i * kExpectedPsqtH2 + j];
-        psqtH2[j] = clip01(sum);
-    }
-    for (std::size_t j = 0; j < kExpectedPsqtH3; ++j)
-    {
-        float sum = psqtB.h3Bias[j];
-        for (std::size_t i = 0; i < kExpectedPsqtH2; ++i)
-            sum += psqtH2[i] * psqtB.h3Weight[i * kExpectedPsqtH3 + j];
-        psqtH3[j] = clip01(sum);
-    }
-    for (std::size_t j = 0; j < kExpectedPosH2; ++j)
-    {
-        float sum = posB.h2Bias[j];
-        for (std::size_t i = 0; i < kExpectedH1Pos; ++i)
-            sum += state.h1Clip[kExpectedH1Psqt + i] * posB.h2Weight[i * kExpectedPosH2 + j];
-        posH2[j] = clip01(sum);
-    }
-    for (std::size_t j = 0; j < kExpectedPosH3; ++j)
-    {
-        float sum = posB.h3Bias[j];
-        for (std::size_t i = 0; i < kExpectedPosH2; ++i)
-            sum += posH2[i] * posB.h3Weight[i * kExpectedPosH3 + j];
-        posH3[j] = clip01(sum);
-    }
+    auto dense_layer_clip = [](const float*              input,
+                               std::size_t               inputDim,
+                               std::size_t               outputDim,
+                               const std::vector<float>& weight,
+                               const std::vector<float>& bias,
+                               float*                    out) {
+        for (std::size_t j = 0; j < outputDim; ++j)
+            out[j] = bias[j];
 
-    float psqtNorm = impl.psqtOutputBias;
-    for (std::size_t i = 0; i < kExpectedPsqtH3; ++i)
-        psqtNorm += psqtH3[i] * impl.psqtOutputWeight[i];
-    float posNorm = impl.positionalOutputBias;
-    for (std::size_t i = 0; i < kExpectedPosH3; ++i)
-        posNorm += posH3[i] * impl.positionalOutputWeight[i];
+        for (std::size_t i = 0; i < inputDim; ++i)
+        {
+            const float  xi  = input[i];
+            const float* row = weight.data() + i * outputDim;
+            for (std::size_t j = 0; j < outputDim; ++j)
+                out[j] += xi * row[j];
+        }
+
+        for (std::size_t j = 0; j < outputDim; ++j)
+            out[j] = clip01(out[j]);
+    };
+
+    auto dense_output = [](const float* input, std::size_t inputDim, const std::vector<float>& weight, float bias) {
+        float sum = bias;
+        for (std::size_t i = 0; i < inputDim; ++i)
+            sum += input[i] * weight[i];
+        return sum;
+    };
+
+    dense_layer_clip(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
+                     psqtH2.data());
+    dense_layer_clip(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
+                     psqtH3.data());
+    dense_layer_clip(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
+                     posB.h2Bias, posH2.data());
+    dense_layer_clip(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
+
+    const float psqtNorm =
+      dense_output(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
+    const float posNorm =
+      dense_output(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
 
     Evaluation out;
     out.psqt       = Value(round_half_away_from_zero(double(psqtNorm) * double(h.labelScalePsqt)));
@@ -1100,13 +1134,9 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
     if (enc.bucket16 < 0 || enc.bucket16 >= int(kExpectedBucketCount))
         return false;
 
-    for (std::size_t j = 0; j < kExpectedH1Total; ++j)
-    {
-        float sum = impl.hidden1Bias[j];
-        for (std::size_t i = 0; i < kExpectedInputSize; ++i)
-            sum += enc.features[i] * impl.hidden1Weight[i * kExpectedH1Total + j];
-        out.h1Pre[j] = sum;
-    }
+    std::copy(impl.hidden1Bias.begin(), impl.hidden1Bias.end(), out.h1Pre.begin());
+    for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+        apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1.0f, out.h1Pre);
     refresh_h1_clip(out.h1Pre, out.h1Clip);
 
     out.valid     = true;
