@@ -31,6 +31,7 @@
 
 #include "evaluate.h"
 #include "misc.h"
+#include "custom_nnue/custom_nnue_eval.h"
 #include "nnue/network.h"
 #include "nnue/nnue_common.h"
 #include "nnue/nnue_misc.h"
@@ -66,7 +67,8 @@ Engine::Engine(std::optional<std::string> path) :
     networks(numaContext,
              // Heap-allocate because sizeof(NN::Networks) is large
              std::make_unique<NN::Networks>(NN::EvalFile{EvalFileDefaultNameBig, "None", ""},
-                                            NN::EvalFile{EvalFileDefaultNameSmall, "None", ""})) {
+                                            NN::EvalFile{EvalFileDefaultNameSmall, "None", ""})),
+    customNetworks(numaContext, CustomNNUE::Network{}) {
 
     pos.set(StartFEN, false, &states->back());
 
@@ -136,16 +138,15 @@ Engine::Engine(std::optional<std::string> path) :
     options.add("SyzygyProbeLimit", Option(7, 0, 7));
 
     options.add(  //
-      "EvalFile", Option(EvalFileDefaultNameBig, [this](const Option& o) {
-          load_big_network(o);
+      "EvalFile", Option(CustomNNUE::EvalFileDefaultName, [this](const Option& o) {
+          load_custom_network(o);
           return std::nullopt;
       }));
 
-    options.add(  //
-      "EvalFileSmall", Option(EvalFileDefaultNameSmall, [this](const Option& o) {
-          load_small_network(o);
-          return std::nullopt;
-      }));
+    options.add("NNUEMode", Option("full incremental", "full"));
+    options.add("NNUETrace", Option(false));
+    options.add("NNUEParityCheck", Option(false));
+    options.add("NNUEMetrics", Option(false));
 
     load_networks();
     resize_threads();
@@ -242,7 +243,7 @@ void Engine::set_numa_config_from_option(const std::string& o) {
 
 void Engine::resize_threads() {
     threads.wait_for_search_finished();
-    threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists, networks},
+    threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists, networks, customNetworks},
                 updateContext);
 
     // Reallocate the hash with the new threadpool size
@@ -260,68 +261,39 @@ void Engine::set_ponderhit(bool b) { threads.main_manager()->ponder = b; }
 // network related
 
 void Engine::verify_networks() const {
-    networks->big.verify(options["EvalFile"], onVerifyNetworks);
-    networks->small.verify(options["EvalFileSmall"], onVerifyNetworks);
-
-    auto statuses = networks.get_status_and_errors();
-    for (size_t i = 0; i < statuses.size(); ++i)
-    {
-        const auto [status, error] = statuses[i];
-        std::string message        = "Network replica " + std::to_string(i + 1) + ": ";
-        if (status == SystemWideSharedConstantAllocationStatus::NoAllocation)
-        {
-            message += "No allocation.";
-        }
-        else if (status == SystemWideSharedConstantAllocationStatus::LocalMemory)
-        {
-            message += "Local memory.";
-        }
-        else if (status == SystemWideSharedConstantAllocationStatus::SharedMemory)
-        {
-            message += "Shared memory.";
-        }
-        else
-        {
-            message += "Unknown status.";
-        }
-
-        if (error.has_value())
-        {
-            message += " " + *error;
-        }
-
-        onVerifyNetworks(message);
-    }
+    customNetworks->verify(options["EvalFile"], onVerifyNetworks);
+    if (onVerifyNetworks)
+        onVerifyNetworks("Custom NNUE replication: NUMA-local lazy replicas (non-shared-memory path).");
 }
 
 void Engine::load_networks() {
-    networks.modify_and_replicate([this](NN::Networks& networks_) {
-        networks_.big.load(binaryDirectory, options["EvalFile"]);
-        networks_.small.load(binaryDirectory, options["EvalFileSmall"]);
+    customNetworks.modify_and_replicate(
+      [this](CustomNNUE::Network& net) { net.load(binaryDirectory, options["EvalFile"]); });
+    threads.clear();
+    threads.ensure_network_replicated();
+}
+
+void Engine::load_custom_network(const std::string& file) {
+    customNetworks.modify_and_replicate([this, &file](CustomNNUE::Network& net) {
+        net.load(binaryDirectory, file);
     });
     threads.clear();
     threads.ensure_network_replicated();
 }
 
 void Engine::load_big_network(const std::string& file) {
-    networks.modify_and_replicate(
-      [this, &file](NN::Networks& networks_) { networks_.big.load(binaryDirectory, file); });
-    threads.clear();
-    threads.ensure_network_replicated();
+    load_custom_network(file);
 }
 
 void Engine::load_small_network(const std::string& file) {
-    networks.modify_and_replicate(
-      [this, &file](NN::Networks& networks_) { networks_.small.load(binaryDirectory, file); });
-    threads.clear();
-    threads.ensure_network_replicated();
+    (void) file;
+    if (onVerifyNetworks)
+        onVerifyNetworks("EvalFileSmall is ignored in custom NNUEX mode.");
 }
 
 void Engine::save_network(const std::pair<std::optional<std::string>, std::string> files[2]) {
-    networks.modify_and_replicate([&files](NN::Networks& networks_) {
-        networks_.big.save(files[0].first);
-        networks_.small.save(files[1].first);
-    });
+    (void) files;
+    sync_cout << "export_net is not supported in custom NNUEX mode" << sync_endl;
 }
 
 // utility functions
@@ -333,7 +305,7 @@ void Engine::trace_eval() const {
 
     verify_networks();
 
-    sync_cout << "\n" << Eval::trace(p, *networks) << sync_endl;
+    sync_cout << "\n" << CustomNNUE::trace(p, *customNetworks) << sync_endl;
 }
 
 const OptionsMap& Engine::get_options() const { return options; }

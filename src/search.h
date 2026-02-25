@@ -32,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "custom_nnue/custom_nnue_network.h"
 #include "history.h"
 #include "misc.h"
 #include "nnue/network.h"
@@ -138,18 +139,21 @@ struct SharedState {
                 ThreadPool&                                               threadPool,
                 TranspositionTable&                                       transpositionTable,
                 std::map<NumaIndex, SharedHistories>&                     sharedHists,
-                const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& nets) :
+                const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& nets,
+                const LazyNumaReplicated<CustomNNUE::Network>&            customNets) :
         options(optionsMap),
         threads(threadPool),
         tt(transpositionTable),
         sharedHistories(sharedHists),
-        networks(nets) {}
+        networks(nets),
+        customNetworks(customNets) {}
 
     const OptionsMap&                                         options;
     ThreadPool&                                               threads;
     TranspositionTable&                                       tt;
     std::map<NumaIndex, SharedHistories>&                     sharedHistories;
     const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& networks;
+    const LazyNumaReplicated<CustomNNUE::Network>&            customNetworks;
 };
 
 class Worker;
@@ -262,6 +266,39 @@ class NullSearchManager: public ISearchManager {
     void check_time(Search::Worker&) override {}
 };
 
+struct CustomNNUEMetrics {
+    std::uint64_t evalCalls                        = 0;
+    std::uint64_t evalIncrementalRequested         = 0;
+    std::uint64_t evalIncrementalStateUsed         = 0;
+    std::uint64_t evalIncrementalStateMiss         = 0;
+    std::uint64_t evalIncrementalTopRebuildCalls   = 0;
+    std::uint64_t evalIncrementalTopRebuildFails   = 0;
+    std::uint64_t wrapperCalls                     = 0;
+    std::uint64_t wrapperFullCalls                 = 0;
+    std::uint64_t wrapperIncrementalCalls          = 0;
+    std::uint64_t rootBuildCalls                   = 0;
+    std::uint64_t rootBuildFails                   = 0;
+    std::uint64_t moveAdvanceCalls                 = 0;
+    std::uint64_t moveAdvanceFails                 = 0;
+    std::uint64_t moveFallbackBuildCalls           = 0;
+    std::uint64_t moveFallbackBuildFails           = 0;
+    std::uint64_t nullAdvanceCalls                 = 0;
+    std::uint64_t nullAdvanceFails                 = 0;
+    std::uint64_t nullFallbackBuildCalls           = 0;
+    std::uint64_t nullFallbackBuildFails           = 0;
+    std::uint64_t parityExtraIncEvalCalls          = 0;
+    std::uint64_t parityExtraFullEvalCalls         = 0;
+    std::uint64_t parityMismatchFallbackFullCalls  = 0;
+    std::uint64_t parityMismatchRebuildCalls       = 0;
+    std::uint64_t parityMismatchRebuildFails       = 0;
+    std::uint64_t workerEvaluateNs                 = 0;
+    std::uint64_t wrapperEvalNs                    = 0;
+    std::uint64_t buildNs                          = 0;
+    std::uint64_t advanceMoveNs                    = 0;
+    std::uint64_t advanceNullNs                    = 0;
+    std::uint64_t parityDirectEvalNs               = 0;
+};
+
 // Search::Worker is the class that does the actual search.
 // It is instantiated once per thread, and it is responsible for keeping track
 // of the search history, and storing data required for the search.
@@ -306,6 +343,12 @@ class Worker {
     void do_null_move(Position& pos, StateInfo& st, Stack* const ss);
     void undo_move(Position& pos, const Move move);
     void undo_null_move(Position& pos);
+    bool use_custom_incremental_mode() const;
+    bool use_custom_metrics() const;
+    void reset_custom_incremental_stack();
+    void push_custom_incremental_move(const Position& posAfterMove, Move move, const DirtyPiece& dirtyPiece);
+    void push_custom_incremental_null(const Position& posAfterNull);
+    void pop_custom_incremental();
 
     // This is the main search function, for both PV and non-PV nodes
     template<NodeType nodeType>
@@ -357,10 +400,16 @@ class Worker {
     ThreadPool&                                               threads;
     TranspositionTable&                                       tt;
     const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& networks;
+    const LazyNumaReplicated<CustomNNUE::Network>&            customNetworks;
 
     // Used by NNUE
     Eval::NNUE::AccumulatorStack  accumulatorStack;
     Eval::NNUE::AccumulatorCaches refreshTable;
+    std::vector<CustomNNUE::IncrementalState> customAccumulatorStack;
+    std::uint64_t                              customParityChecks     = 0;
+    std::uint64_t                              customParityMismatches = 0;
+    std::uint64_t                              customParityLogs       = 0;
+    CustomNNUEMetrics                          customMetrics{};
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

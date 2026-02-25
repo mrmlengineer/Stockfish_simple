@@ -34,6 +34,7 @@
 #include <utility>
 
 #include "bitboard.h"
+#include "custom_nnue/custom_nnue_eval.h"
 #include "evaluate.h"
 #include "history.h"
 #include "misc.h"
@@ -67,6 +68,94 @@ namespace {
 constexpr int SEARCHEDLIST_CAPACITY = 32;
 constexpr int mainHistoryDefault    = 68;
 using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
+using SteadyClock                   = std::chrono::steady_clock;
+
+struct ScopedNsTimer {
+    explicit ScopedNsTimer(std::uint64_t* dst_) : dst(dst_) {
+        if (dst)
+            start = SteadyClock::now();
+    }
+
+    ~ScopedNsTimer() {
+        if (dst)
+            *dst += std::uint64_t(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - start).count());
+    }
+
+    std::uint64_t*          dst   = nullptr;
+    SteadyClock::time_point start = {};
+};
+
+void accumulate_custom_metrics(CustomNNUEMetrics& dst, const CustomNNUEMetrics& src) {
+    dst.evalCalls += src.evalCalls;
+    dst.evalIncrementalRequested += src.evalIncrementalRequested;
+    dst.evalIncrementalStateUsed += src.evalIncrementalStateUsed;
+    dst.evalIncrementalStateMiss += src.evalIncrementalStateMiss;
+    dst.evalIncrementalTopRebuildCalls += src.evalIncrementalTopRebuildCalls;
+    dst.evalIncrementalTopRebuildFails += src.evalIncrementalTopRebuildFails;
+    dst.wrapperCalls += src.wrapperCalls;
+    dst.wrapperFullCalls += src.wrapperFullCalls;
+    dst.wrapperIncrementalCalls += src.wrapperIncrementalCalls;
+    dst.rootBuildCalls += src.rootBuildCalls;
+    dst.rootBuildFails += src.rootBuildFails;
+    dst.moveAdvanceCalls += src.moveAdvanceCalls;
+    dst.moveAdvanceFails += src.moveAdvanceFails;
+    dst.moveFallbackBuildCalls += src.moveFallbackBuildCalls;
+    dst.moveFallbackBuildFails += src.moveFallbackBuildFails;
+    dst.nullAdvanceCalls += src.nullAdvanceCalls;
+    dst.nullAdvanceFails += src.nullAdvanceFails;
+    dst.nullFallbackBuildCalls += src.nullFallbackBuildCalls;
+    dst.nullFallbackBuildFails += src.nullFallbackBuildFails;
+    dst.parityExtraIncEvalCalls += src.parityExtraIncEvalCalls;
+    dst.parityExtraFullEvalCalls += src.parityExtraFullEvalCalls;
+    dst.parityMismatchFallbackFullCalls += src.parityMismatchFallbackFullCalls;
+    dst.parityMismatchRebuildCalls += src.parityMismatchRebuildCalls;
+    dst.parityMismatchRebuildFails += src.parityMismatchRebuildFails;
+    dst.workerEvaluateNs += src.workerEvaluateNs;
+    dst.wrapperEvalNs += src.wrapperEvalNs;
+    dst.buildNs += src.buildNs;
+    dst.advanceMoveNs += src.advanceMoveNs;
+    dst.advanceNullNs += src.advanceNullNs;
+    dst.parityDirectEvalNs += src.parityDirectEvalNs;
+}
+
+CustomNNUEMetrics diff_custom_metrics(const CustomNNUEMetrics& after, const CustomNNUEMetrics& before) {
+    CustomNNUEMetrics d{};
+    d.evalCalls = after.evalCalls - before.evalCalls;
+    d.evalIncrementalRequested = after.evalIncrementalRequested - before.evalIncrementalRequested;
+    d.evalIncrementalStateUsed = after.evalIncrementalStateUsed - before.evalIncrementalStateUsed;
+    d.evalIncrementalStateMiss = after.evalIncrementalStateMiss - before.evalIncrementalStateMiss;
+    d.evalIncrementalTopRebuildCalls =
+      after.evalIncrementalTopRebuildCalls - before.evalIncrementalTopRebuildCalls;
+    d.evalIncrementalTopRebuildFails =
+      after.evalIncrementalTopRebuildFails - before.evalIncrementalTopRebuildFails;
+    d.wrapperCalls = after.wrapperCalls - before.wrapperCalls;
+    d.wrapperFullCalls = after.wrapperFullCalls - before.wrapperFullCalls;
+    d.wrapperIncrementalCalls = after.wrapperIncrementalCalls - before.wrapperIncrementalCalls;
+    d.rootBuildCalls = after.rootBuildCalls - before.rootBuildCalls;
+    d.rootBuildFails = after.rootBuildFails - before.rootBuildFails;
+    d.moveAdvanceCalls = after.moveAdvanceCalls - before.moveAdvanceCalls;
+    d.moveAdvanceFails = after.moveAdvanceFails - before.moveAdvanceFails;
+    d.moveFallbackBuildCalls = after.moveFallbackBuildCalls - before.moveFallbackBuildCalls;
+    d.moveFallbackBuildFails = after.moveFallbackBuildFails - before.moveFallbackBuildFails;
+    d.nullAdvanceCalls = after.nullAdvanceCalls - before.nullAdvanceCalls;
+    d.nullAdvanceFails = after.nullAdvanceFails - before.nullAdvanceFails;
+    d.nullFallbackBuildCalls = after.nullFallbackBuildCalls - before.nullFallbackBuildCalls;
+    d.nullFallbackBuildFails = after.nullFallbackBuildFails - before.nullFallbackBuildFails;
+    d.parityExtraIncEvalCalls = after.parityExtraIncEvalCalls - before.parityExtraIncEvalCalls;
+    d.parityExtraFullEvalCalls = after.parityExtraFullEvalCalls - before.parityExtraFullEvalCalls;
+    d.parityMismatchFallbackFullCalls =
+      after.parityMismatchFallbackFullCalls - before.parityMismatchFallbackFullCalls;
+    d.parityMismatchRebuildCalls = after.parityMismatchRebuildCalls - before.parityMismatchRebuildCalls;
+    d.parityMismatchRebuildFails = after.parityMismatchRebuildFails - before.parityMismatchRebuildFails;
+    d.workerEvaluateNs = after.workerEvaluateNs - before.workerEvaluateNs;
+    d.wrapperEvalNs = after.wrapperEvalNs - before.wrapperEvalNs;
+    d.buildNs = after.buildNs - before.buildNs;
+    d.advanceMoveNs = after.advanceMoveNs - before.advanceMoveNs;
+    d.advanceNullNs = after.advanceNullNs - before.advanceNullNs;
+    d.parityDirectEvalNs = after.parityDirectEvalNs - before.parityDirectEvalNs;
+    return d;
+}
 
 // (*Scalers):
 // The values with Scaler asterisks have proven non-linear scaling.
@@ -170,6 +259,7 @@ Search::Worker::Worker(SharedState&                    sharedState,
     threads(sharedState.threads),
     tt(sharedState.tt),
     networks(sharedState.networks),
+    customNetworks(sharedState.customNetworks),
     refreshTable(networks[token]) {
     clear();
 }
@@ -178,11 +268,155 @@ void Search::Worker::ensure_network_replicated() {
     // Access once to force lazy initialization.
     // We do this because we want to avoid initialization during search.
     (void) (networks[numaAccessToken]);
+    (void) (customNetworks[numaAccessToken]);
+}
+
+bool Search::Worker::use_custom_incremental_mode() const {
+    return options.count("NNUEMode") && options["NNUEMode"] == "incremental";
+}
+
+bool Search::Worker::use_custom_metrics() const {
+    return options.count("NNUEMetrics") && int(options["NNUEMetrics"]) != 0;
+}
+
+void Search::Worker::reset_custom_incremental_stack() {
+    customAccumulatorStack.clear();
+    if (!use_custom_incremental_mode())
+        return;
+
+    customAccumulatorStack.resize(1);
+    auto& net = customNetworks[numaAccessToken];
+    const bool metricsEnabled = use_custom_metrics();
+    if (metricsEnabled)
+        ++customMetrics.rootBuildCalls;
+    bool ok = false;
+    {
+        ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
+        ok = net.build_incremental_state(rootPos, customAccumulatorStack[0]);
+    }
+    if (!ok)
+    {
+        customAccumulatorStack[0].valid = false;
+        if (metricsEnabled)
+            ++customMetrics.rootBuildFails;
+    }
+}
+
+void Search::Worker::push_custom_incremental_move(const Position& posAfterMove,
+                                                  Move            move,
+                                                  const DirtyPiece& dirtyPiece) {
+    if (!use_custom_incremental_mode())
+        return;
+
+    auto&                       net = customNetworks[numaAccessToken];
+    CustomNNUE::IncrementalState next;
+    bool                        ok = false;
+    const bool                  metricsEnabled = use_custom_metrics();
+
+    if (!customAccumulatorStack.empty())
+    {
+        const auto& prev = customAccumulatorStack.back();
+        if (prev.valid)
+        {
+            if (metricsEnabled)
+                ++customMetrics.moveAdvanceCalls;
+            {
+                ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceMoveNs : nullptr);
+                ok = net.advance_incremental_state(posAfterMove, move, dirtyPiece, prev, next);
+            }
+            if (!ok && metricsEnabled)
+                ++customMetrics.moveAdvanceFails;
+        }
+    }
+    if (!ok)
+    {
+        if (metricsEnabled)
+            ++customMetrics.moveFallbackBuildCalls;
+        {
+            ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
+            ok = net.build_incremental_state(posAfterMove, next);
+        }
+        if (!ok && metricsEnabled)
+            ++customMetrics.moveFallbackBuildFails;
+    }
+    if (!ok)
+        next.valid = false;
+
+    customAccumulatorStack.push_back(std::move(next));
+}
+
+void Search::Worker::push_custom_incremental_null(const Position& posAfterNull) {
+    if (!use_custom_incremental_mode())
+        return;
+
+    auto&                       net = customNetworks[numaAccessToken];
+    CustomNNUE::IncrementalState next;
+    bool                        ok = false;
+    const bool                  metricsEnabled = use_custom_metrics();
+
+    if (!customAccumulatorStack.empty())
+    {
+        const auto& prev = customAccumulatorStack.back();
+        if (prev.valid)
+        {
+            if (metricsEnabled)
+                ++customMetrics.nullAdvanceCalls;
+            {
+                ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceNullNs : nullptr);
+                ok = net.advance_incremental_state_null(posAfterNull, prev, next);
+            }
+            if (!ok && metricsEnabled)
+                ++customMetrics.nullAdvanceFails;
+        }
+    }
+    if (!ok)
+    {
+        if (metricsEnabled)
+            ++customMetrics.nullFallbackBuildCalls;
+        {
+            ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
+            ok = net.build_incremental_state(posAfterNull, next);
+        }
+        if (!ok && metricsEnabled)
+            ++customMetrics.nullFallbackBuildFails;
+    }
+    if (!ok)
+        next.valid = false;
+
+    customAccumulatorStack.push_back(std::move(next));
+}
+
+void Search::Worker::pop_custom_incremental() {
+    if (customAccumulatorStack.size() > 1)
+        customAccumulatorStack.pop_back();
 }
 
 void Search::Worker::start_searching() {
 
     accumulatorStack.reset();
+    reset_custom_incremental_stack();
+    const bool paritySummaryEnabled =
+      use_custom_incremental_mode() && options.count("NNUEParityCheck") && int(options["NNUEParityCheck"]) != 0;
+    const bool metricsSummaryEnabled = use_custom_metrics();
+    auto parity_totals = [&]() {
+        std::pair<std::uint64_t, std::uint64_t> totals{0, 0};
+        for (const auto& th : threads)
+        {
+            const auto* w = th->worker.get();
+            totals.first += w->customParityChecks;
+            totals.second += w->customParityMismatches;
+        }
+        return totals;
+    };
+    const auto [parityChecksBefore, parityMismatchesBefore] =
+      paritySummaryEnabled ? parity_totals() : std::pair<std::uint64_t, std::uint64_t>{0, 0};
+    auto metrics_totals = [&]() {
+        CustomNNUEMetrics totals{};
+        for (const auto& th : threads)
+            accumulate_custom_metrics(totals, th->worker->customMetrics);
+        return totals;
+    };
+    const CustomNNUEMetrics metricsBefore = metricsSummaryEnabled ? metrics_totals() : CustomNNUEMetrics{};
 
     // Non-main threads go directly to iterative_deepening()
     if (!is_mainthread())
@@ -221,6 +455,85 @@ void Search::Worker::start_searching() {
 
     // Wait until all threads have finished
     threads.wait_for_search_finished();
+
+    if (paritySummaryEnabled)
+    {
+        const auto [parityChecksAfter, parityMismatchesAfter] = parity_totals();
+        sync_cout << "info string Custom NNUE incremental parity summary"
+                  << " search_checks=" << (parityChecksAfter - parityChecksBefore)
+                  << " search_mismatches=" << (parityMismatchesAfter - parityMismatchesBefore)
+                  << " total_checks=" << parityChecksAfter
+                  << " total_mismatches=" << parityMismatchesAfter << sync_endl;
+    }
+
+    if (metricsSummaryEnabled)
+    {
+        const CustomNNUEMetrics metricsAfter  = metrics_totals();
+        const CustomNNUEMetrics metricsSearch = diff_custom_metrics(metricsAfter, metricsBefore);
+        sync_cout << "info string Custom NNUE metrics summary"
+                  << " search_eval_calls=" << metricsSearch.evalCalls
+                  << " search_eval_incremental_requested=" << metricsSearch.evalIncrementalRequested
+                  << " search_eval_incremental_used=" << metricsSearch.evalIncrementalStateUsed
+                  << " search_eval_incremental_miss=" << metricsSearch.evalIncrementalStateMiss
+                  << " search_eval_top_rebuild_calls=" << metricsSearch.evalIncrementalTopRebuildCalls
+                  << " search_eval_top_rebuild_fails=" << metricsSearch.evalIncrementalTopRebuildFails
+                  << " search_wrapper_calls=" << metricsSearch.wrapperCalls
+                  << " search_wrapper_full_calls=" << metricsSearch.wrapperFullCalls
+                  << " search_wrapper_incremental_calls=" << metricsSearch.wrapperIncrementalCalls
+                  << " search_root_build_calls=" << metricsSearch.rootBuildCalls
+                  << " search_root_build_fails=" << metricsSearch.rootBuildFails
+                  << " search_move_advance_calls=" << metricsSearch.moveAdvanceCalls
+                  << " search_move_advance_fails=" << metricsSearch.moveAdvanceFails
+                  << " search_move_fallback_build_calls=" << metricsSearch.moveFallbackBuildCalls
+                  << " search_move_fallback_build_fails=" << metricsSearch.moveFallbackBuildFails
+                  << " search_null_advance_calls=" << metricsSearch.nullAdvanceCalls
+                  << " search_null_advance_fails=" << metricsSearch.nullAdvanceFails
+                  << " search_null_fallback_build_calls=" << metricsSearch.nullFallbackBuildCalls
+                  << " search_null_fallback_build_fails=" << metricsSearch.nullFallbackBuildFails
+                  << " search_parity_extra_inc_eval_calls=" << metricsSearch.parityExtraIncEvalCalls
+                  << " search_parity_extra_full_eval_calls=" << metricsSearch.parityExtraFullEvalCalls
+                  << " search_parity_mismatch_fallback_full_calls="
+                  << metricsSearch.parityMismatchFallbackFullCalls
+                  << " search_parity_mismatch_rebuild_calls=" << metricsSearch.parityMismatchRebuildCalls
+                  << " search_parity_mismatch_rebuild_fails=" << metricsSearch.parityMismatchRebuildFails
+                  << " search_worker_eval_ns=" << metricsSearch.workerEvaluateNs
+                  << " search_wrapper_eval_ns=" << metricsSearch.wrapperEvalNs
+                  << " search_build_ns=" << metricsSearch.buildNs
+                  << " search_advance_move_ns=" << metricsSearch.advanceMoveNs
+                  << " search_advance_null_ns=" << metricsSearch.advanceNullNs
+                  << " search_parity_direct_eval_ns=" << metricsSearch.parityDirectEvalNs
+                  << " total_eval_calls=" << metricsAfter.evalCalls
+                  << " total_eval_incremental_requested=" << metricsAfter.evalIncrementalRequested
+                  << " total_eval_incremental_used=" << metricsAfter.evalIncrementalStateUsed
+                  << " total_eval_incremental_miss=" << metricsAfter.evalIncrementalStateMiss
+                  << " total_eval_top_rebuild_calls=" << metricsAfter.evalIncrementalTopRebuildCalls
+                  << " total_eval_top_rebuild_fails=" << metricsAfter.evalIncrementalTopRebuildFails
+                  << " total_wrapper_calls=" << metricsAfter.wrapperCalls
+                  << " total_wrapper_full_calls=" << metricsAfter.wrapperFullCalls
+                  << " total_wrapper_incremental_calls=" << metricsAfter.wrapperIncrementalCalls
+                  << " total_root_build_calls=" << metricsAfter.rootBuildCalls
+                  << " total_root_build_fails=" << metricsAfter.rootBuildFails
+                  << " total_move_advance_calls=" << metricsAfter.moveAdvanceCalls
+                  << " total_move_advance_fails=" << metricsAfter.moveAdvanceFails
+                  << " total_move_fallback_build_calls=" << metricsAfter.moveFallbackBuildCalls
+                  << " total_move_fallback_build_fails=" << metricsAfter.moveFallbackBuildFails
+                  << " total_null_advance_calls=" << metricsAfter.nullAdvanceCalls
+                  << " total_null_advance_fails=" << metricsAfter.nullAdvanceFails
+                  << " total_null_fallback_build_calls=" << metricsAfter.nullFallbackBuildCalls
+                  << " total_null_fallback_build_fails=" << metricsAfter.nullFallbackBuildFails
+                  << " total_parity_extra_inc_eval_calls=" << metricsAfter.parityExtraIncEvalCalls
+                  << " total_parity_extra_full_eval_calls=" << metricsAfter.parityExtraFullEvalCalls
+                  << " total_parity_mismatch_fallback_full_calls="
+                  << metricsAfter.parityMismatchFallbackFullCalls
+                  << " total_parity_mismatch_rebuild_calls=" << metricsAfter.parityMismatchRebuildCalls
+                  << " total_parity_mismatch_rebuild_fails=" << metricsAfter.parityMismatchRebuildFails
+                  << " total_worker_eval_ns=" << metricsAfter.workerEvaluateNs
+                  << " total_wrapper_eval_ns=" << metricsAfter.wrapperEvalNs
+                  << " total_build_ns=" << metricsAfter.buildNs
+                  << " total_advance_move_ns=" << metricsAfter.advanceMoveNs
+                  << " total_advance_null_ns=" << metricsAfter.advanceNullNs
+                  << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs << sync_endl;
+    }
 
     // When playing in 'nodes as time' mode, subtract the searched nodes from
     // the available ones before exiting.
@@ -556,6 +869,7 @@ void Search::Worker::do_move(
 
     auto [dirtyPiece, dirtyThreats] = accumulatorStack.push();
     pos.do_move(move, st, givesCheck, dirtyPiece, dirtyThreats, &tt, &sharedHistory);
+    push_custom_incremental_move(pos, move, dirtyPiece);
 
     if (ss != nullptr)
     {
@@ -569,6 +883,7 @@ void Search::Worker::do_move(
 
 void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss) {
     pos.do_null_move(st, tt);
+    push_custom_incremental_null(pos);
     ss->currentMove                   = Move::null();
     ss->continuationHistory           = &continuationHistory[0][0][NO_PIECE][0];
     ss->continuationCorrectionHistory = &continuationCorrectionHistory[NO_PIECE][0];
@@ -577,9 +892,14 @@ void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss)
 void Search::Worker::undo_move(Position& pos, const Move move) {
     pos.undo_move(move);
     accumulatorStack.pop();
+    (void) move;
+    pop_custom_incremental();
 }
 
-void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
+void Search::Worker::undo_null_move(Position& pos) {
+    pos.undo_null_move();
+    pop_custom_incremental();
+}
 
 
 // Reset histories, usually before a new game
@@ -592,6 +912,9 @@ void Search::Worker::clear() {
     sharedHistory.pawnHistory.clear_range(-1238, numaThreadIdx, numaTotal);
 
     ttMoveHistory = 0;
+    customAccumulatorStack.clear();
+    customParityChecks = customParityMismatches = customParityLogs = 0;
+    customMetrics = {};
 
     for (auto& to : continuationCorrectionHistory)
         for (auto& h : to)
@@ -675,7 +998,7 @@ Value Search::Worker::search(
         // Step 2. Check for aborted search and immediate draw
         if (threads.stop.load(std::memory_order_relaxed) || pos.is_draw(ss->ply)
             || ss->ply >= MAX_PLY)
-            return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : value_draw(nodes);
+            return (ss->ply >= MAX_PLY && !ss->inCheck) ? this->evaluate(pos) : value_draw(nodes);
 
         // Step 3. Mate distance pruning. Even if we mate at the next move our score
         // would be at best mate_in(ss->ply + 1), but if alpha is already bigger because
@@ -722,7 +1045,7 @@ Value Search::Worker::search(
         // Never assume anything about values stored in TT
         unadjustedStaticEval = ttData.eval;
         if (!is_valid(unadjustedStaticEval))
-            unadjustedStaticEval = evaluate(pos);
+            unadjustedStaticEval = this->evaluate(pos);
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -733,7 +1056,7 @@ Value Search::Worker::search(
     }
     else
     {
-        unadjustedStaticEval = evaluate(pos);
+        unadjustedStaticEval = this->evaluate(pos);
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
         // Static evaluation is saved as it was before adjustment by correction history
@@ -1535,7 +1858,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
 
     // Step 2. Check for an immediate draw or maximum ply reached
     if (pos.is_draw(ss->ply) || ss->ply >= MAX_PLY)
-        return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : VALUE_DRAW;
+        return (ss->ply >= MAX_PLY && !ss->inCheck) ? this->evaluate(pos) : VALUE_DRAW;
 
     assert(0 <= ss->ply && ss->ply < MAX_PLY);
 
@@ -1568,7 +1891,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
             unadjustedStaticEval = ttData.eval;
 
             if (!is_valid(unadjustedStaticEval))
-                unadjustedStaticEval = evaluate(pos);
+                unadjustedStaticEval = this->evaluate(pos);
 
             ss->staticEval = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
@@ -1580,7 +1903,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         }
         else
         {
-            unadjustedStaticEval = evaluate(pos);
+            unadjustedStaticEval = this->evaluate(pos);
             ss->staticEval       = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
         }
@@ -1752,8 +2075,168 @@ TimePoint Search::Worker::elapsed() const {
 TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elapsed_time(); }
 
 Value Search::Worker::evaluate(const Position& pos) {
-    return Eval::evaluate(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
-                          optimism[pos.side_to_move()]);
+    const bool incrementalRequested =
+      options.count("NNUEMode") && options["NNUEMode"] == "incremental";
+    auto&      net = customNetworks[numaAccessToken];
+    const bool parityCheckEnabled =
+      incrementalRequested && options.count("NNUEParityCheck") && int(options["NNUEParityCheck"]) != 0;
+    const bool metricsEnabled = use_custom_metrics();
+
+    if (metricsEnabled)
+    {
+        ++customMetrics.evalCalls;
+        if (incrementalRequested)
+            ++customMetrics.evalIncrementalRequested;
+    }
+    ScopedNsTimer evalTimer(metricsEnabled ? &customMetrics.workerEvaluateNs : nullptr);
+
+    if (incrementalRequested)
+    {
+        CustomNNUE::IncrementalState* inc = nullptr;
+        if (!customAccumulatorStack.empty())
+        {
+            auto& top = customAccumulatorStack.back();
+            if (!top.valid || top.key != pos.key())
+            {
+                if (metricsEnabled)
+                    ++customMetrics.evalIncrementalTopRebuildCalls;
+                bool rebuilt = false;
+                {
+                    ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
+                    rebuilt = net.build_incremental_state(pos, top);
+                }
+                if (!rebuilt && metricsEnabled)
+                    ++customMetrics.evalIncrementalTopRebuildFails;
+            }
+            if (top.valid && top.key == pos.key())
+                inc = &top;
+        }
+
+        if (metricsEnabled)
+        {
+            if (inc != nullptr)
+                ++customMetrics.evalIncrementalStateUsed;
+            else
+                ++customMetrics.evalIncrementalStateMiss;
+        }
+
+        if (parityCheckEnabled)
+        {
+            CustomNNUE::IncrementalState parityTmp;
+            const CustomNNUE::IncrementalState* parityInc = inc;
+            if (parityInc == nullptr && net.build_incremental_state(pos, parityTmp) && parityTmp.valid)
+                parityInc = &parityTmp;
+
+            ++customParityChecks;
+            std::optional<CustomNNUE::Evaluation> incOut;
+            if (parityInc != nullptr)
+            {
+                if (metricsEnabled)
+                    ++customMetrics.parityExtraIncEvalCalls;
+                ScopedNsTimer timer(metricsEnabled ? &customMetrics.parityDirectEvalNs : nullptr);
+                incOut = net.evaluate(*parityInc);
+            }
+            if (metricsEnabled)
+                ++customMetrics.parityExtraFullEvalCalls;
+            const std::optional<CustomNNUE::Evaluation> fullOut = [&]() {
+                ScopedNsTimer timer(metricsEnabled ? &customMetrics.parityDirectEvalNs : nullptr);
+                return net.evaluate(pos);
+            }();
+
+            bool mismatch = !incOut.has_value() || !fullOut.has_value();
+            if (!mismatch)
+            {
+                const auto& incEval  = *incOut;
+                const auto& fullEval = *fullOut;
+                mismatch = mismatch || incEval.pieceCount != fullEval.pieceCount
+                        || incEval.bucket8 != fullEval.bucket8 || incEval.stmBlack != fullEval.stmBlack
+                        || incEval.bucket16 != fullEval.bucket16;
+
+                constexpr float kNormTol = 1e-6f;
+                mismatch = mismatch || std::abs(incEval.psqtNorm - fullEval.psqtNorm) > kNormTol
+                        || std::abs(incEval.posNorm - fullEval.posNorm) > kNormTol;
+
+                // Incremental H1 updates reorder float additions versus full recompute.
+                // Rare 1 cp differences can occur when outputs are near half-cp rounding boundaries.
+                mismatch = mismatch || std::abs(int(incEval.psqt) - int(fullEval.psqt)) > 1
+                        || std::abs(int(incEval.positional) - int(fullEval.positional)) > 1;
+            }
+
+            if (mismatch)
+            {
+                ++customParityMismatches;
+
+                if (!customAccumulatorStack.empty())
+                {
+                    if (metricsEnabled)
+                        ++customMetrics.parityMismatchRebuildCalls;
+                    bool rebuilt = false;
+                    {
+                        ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
+                        rebuilt = net.build_incremental_state(pos, customAccumulatorStack.back());
+                    }
+                    if (!rebuilt)
+                    {
+                        customAccumulatorStack.back().valid = false;
+                        if (metricsEnabled)
+                            ++customMetrics.parityMismatchRebuildFails;
+                    }
+                }
+
+                if (customParityLogs < 8)
+                {
+                    ++customParityLogs;
+                    std::ostringstream ss;
+                    ss << "info string Custom NNUE incremental parity mismatch"
+                       << " checks=" << customParityChecks << " mismatches=" << customParityMismatches
+                       << " key=" << pos.key() << " cache_available=" << (inc != nullptr ? 1 : 0)
+                       << " parity_tmp_used=" << (parityInc == &parityTmp ? 1 : 0);
+                    if (incOut && fullOut)
+                    {
+                        ss << " piece_count inc/full=" << incOut->pieceCount << "/" << fullOut->pieceCount
+                           << " bucket16 inc/full=" << incOut->bucket16 << "/" << fullOut->bucket16
+                           << " psqt inc/full=" << int(incOut->psqt) << "/" << int(fullOut->psqt)
+                           << " pos inc/full=" << int(incOut->positional) << "/" << int(fullOut->positional)
+                           << " dnorm=(" << (incOut->psqtNorm - fullOut->psqtNorm) << ","
+                           << (incOut->posNorm - fullOut->posNorm) << ")";
+                    }
+                    sync_cout << ss.str() << sync_endl;
+                }
+
+                if (metricsEnabled)
+                {
+                    ++customMetrics.parityMismatchFallbackFullCalls;
+                    ++customMetrics.wrapperCalls;
+                    ++customMetrics.wrapperFullCalls;
+                    ScopedNsTimer timer(&customMetrics.wrapperEvalNs);
+                    return CustomNNUE::evaluate(net, pos, nullptr, optimism[pos.side_to_move()], true);
+                }
+                return CustomNNUE::evaluate(net, pos, nullptr, optimism[pos.side_to_move()], true);
+            }
+        }
+
+        if (metricsEnabled)
+        {
+            ++customMetrics.wrapperCalls;
+            if (inc != nullptr)
+                ++customMetrics.wrapperIncrementalCalls;
+            else
+                ++customMetrics.wrapperFullCalls;
+            ScopedNsTimer timer(&customMetrics.wrapperEvalNs);
+            return CustomNNUE::evaluate(net, pos, inc, optimism[pos.side_to_move()], true);
+        }
+        return CustomNNUE::evaluate(net, pos, inc, optimism[pos.side_to_move()], true);
+    }
+
+    if (metricsEnabled)
+    {
+        ++customMetrics.wrapperCalls;
+        ++customMetrics.wrapperFullCalls;
+        ScopedNsTimer timer(&customMetrics.wrapperEvalNs);
+        return Eval::evaluate(net, pos, optimism[pos.side_to_move()], incrementalRequested);
+    }
+    return Eval::evaluate(net, pos, optimism[pos.side_to_move()],
+                          incrementalRequested);
 }
 
 namespace {

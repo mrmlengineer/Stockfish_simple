@@ -26,6 +26,9 @@
 namespace Stockfish {
 
 class Position;
+namespace CustomNNUE {
+class Network;
+}
 
 namespace Eval {
 
@@ -51,6 +54,10 @@ Value evaluate(const NNUE::Networks&          networks,
                Eval::NNUE::AccumulatorStack&  accumulators,
                Eval::NNUE::AccumulatorCaches& caches,
                int                            optimism);
+Value evaluate(const CustomNNUE::Network& customNetwork,
+               const Position&            pos,
+               int                        optimism,
+               bool                       incrementalRequested);
 }  // namespace Eval
 
 }  // namespace Stockfish

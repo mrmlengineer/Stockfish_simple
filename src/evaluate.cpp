@@ -34,6 +34,7 @@
 #include "types.h"
 #include "uci.h"
 #include "nnue/nnue_accumulator.h"
+#include "custom_nnue/custom_nnue_eval.h"
 
 namespace Stockfish {
 
@@ -47,6 +48,14 @@ int Eval::simple_eval(const Position& pos) {
 }
 
 bool Eval::use_smallnet(const Position& pos) { return std::abs(simple_eval(pos)) > 962; }
+
+Value Eval::evaluate(const CustomNNUE::Network& customNetwork,
+                     const Position&            pos,
+                     int                        optimism,
+                     bool                       incrementalRequested) {
+    assert(!pos.checkers());
+    return CustomNNUE::evaluate(customNetwork, pos, optimism, incrementalRequested);
+}
 
 // Evaluate is the evaluator for the outer world. It returns a static evaluation
 // of the position from the point of view of the side to move.
