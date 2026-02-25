@@ -53,6 +53,22 @@ long long round_half_away_from_zero(double x) {
                     : static_cast<long long>(std::ceil(x - 0.5));
 }
 
+std::int64_t round_div_symmetric_i64(std::int64_t x, std::int32_t denom) {
+    if (denom <= 0)
+        return 0;
+    const std::int64_t absX = x >= 0 ? x : -x;
+    const std::int64_t q    = (absX + (denom / 2)) / denom;
+    return x >= 0 ? q : -q;
+}
+
+std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
+    if (x < 0)
+        return 0;
+    if (x > hiddenQuantizedOne)
+        return static_cast<std::uint8_t>(hiddenQuantizedOne);
+    return static_cast<std::uint8_t>(x);
+}
+
 struct Header {
     std::array<char, 8> magic{};
     std::uint32_t       version = 0, headerSize = 0, flags = 0, featureVariantId = 0,
@@ -400,7 +416,7 @@ bool read_scaled_array(ByteReader& rd, std::size_t count, float scale, std::vect
     return true;
 }
 
-bool read_scaled_scalar_i32(ByteReader& rd, float scale, float& out) {
+[[maybe_unused]] bool read_scaled_scalar_i32(ByteReader& rd, float scale, float& out) {
     if (scale == 0.0f)
         return false;
     std::int32_t v{};
@@ -410,8 +426,42 @@ bool read_scaled_scalar_i32(ByteReader& rd, float scale, float& out) {
     return true;
 }
 
+template<typename IntT>
+bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT>& out) {
+    out.resize(count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if constexpr (std::is_same_v<IntT, std::int8_t>)
+        {
+            std::int8_t v{};
+            if (!rd.read_i8(v))
+                return false;
+            out[i] = v;
+        }
+        else if constexpr (std::is_same_v<IntT, std::int16_t>)
+        {
+            std::int16_t v{};
+            if (!rd.read_i16(v))
+                return false;
+            out[i] = v;
+        }
+        else
+        {
+            static_assert(std::is_same_v<IntT, std::int32_t>);
+            std::int32_t v{};
+            if (!rd.read_i32(v))
+                return false;
+            out[i] = v;
+        }
+    }
+    return true;
+}
+
+bool read_raw_scalar_i32(ByteReader& rd, std::int32_t& out) { return rd.read_i32(out); }
+
 struct BucketLayers {
-    std::vector<float> h2Weight, h2Bias, h3Weight, h3Bias;
+    std::vector<std::int8_t>  h2Weight, h3Weight;
+    std::vector<std::int32_t> h2Bias, h3Bias;
 };
 
 struct EncodedFen {
@@ -465,7 +515,7 @@ int piece_index_all(char p) {
 bool add_active_feature(EncodedFen& enc, int featureIndex);
 [[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err);
 bool encode_position_v2(const Position& pos, EncodedFen& out);
-bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
+bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
 std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc);
 bool build_incremental_state_from_encoded(const Network::Impl&  impl,
                                           const EncodedFen&     enc,
@@ -490,14 +540,14 @@ struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
 
-    std::vector<float> hidden1Weight;
-    std::vector<float> hidden1Bias;
+    std::vector<std::int16_t> hidden1Weight;
+    std::vector<std::int16_t> hidden1Bias;
     std::array<BucketLayers, kExpectedBucketCount> psqtBuckets{};
     std::array<BucketLayers, kExpectedBucketCount> positionalBuckets{};
-    std::vector<float> psqtOutputWeight;
-    float              psqtOutputBias = 0.0f;
-    std::vector<float> positionalOutputWeight;
-    float              positionalOutputBias = 0.0f;
+    std::vector<std::int8_t> psqtOutputWeight;
+    std::int32_t             psqtOutputBias = 0;
+    std::vector<std::int8_t> positionalOutputWeight;
+    std::int32_t             positionalOutputBias = 0;
 };
 
 Network::Network(const Network& other) :
@@ -593,7 +643,7 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
         return false;
     if (!verify_file_checksums(bytes, newImpl->header, err))
         return false;
-    if (!load_payload_dequantized(bytes, *newImpl, err))
+    if (!load_payload_quantized(bytes, *newImpl, err))
         return false;
 
     newImpl->metadataJsonPresent =
@@ -832,20 +882,13 @@ namespace {
     return true;
 }
 
-bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err) {
+bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err) {
     const Header& h = impl.header;
     const auto*   p = fileBytes.data() + h.headerSize;
     ByteReader    rd(p, p + std::size_t(h.tensorPayloadBytes));
 
-    const float h1Scale      = h.ftQuantizedOne;
-    const float hiddenWScale = h.weightScaleHidden;
-    const float hiddenBScale = h.weightScaleHidden * h.hiddenQuantizedOne;
-    const float outWScale    = h.nnue2score * h.weightScaleOut / h.hiddenQuantizedOne;
-    const float outBScale    = h.nnue2score * h.weightScaleOut;
-
-    if (!read_scaled_array<std::int16_t>(
-          rd, std::size_t(kExpectedInputSize) * kExpectedH1Total, h1Scale, impl.hidden1Weight)
-        || !read_scaled_array<std::int16_t>(rd, kExpectedH1Total, h1Scale, impl.hidden1Bias))
+    if (!read_raw_array<std::int16_t>(rd, std::size_t(kExpectedInputSize) * kExpectedH1Total, impl.hidden1Weight)
+        || !read_raw_array<std::int16_t>(rd, kExpectedH1Total, impl.hidden1Bias))
     {
         err = "Failed reading hidden_1 tensors";
         return false;
@@ -853,12 +896,10 @@ bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Networ
 
     for (auto& b : impl.psqtBuckets)
     {
-        if (!read_scaled_array<std::int8_t>(
-              rd, std::size_t(kExpectedH1Psqt) * kExpectedPsqtH2, hiddenWScale, b.h2Weight)
-            || !read_scaled_array<std::int32_t>(rd, kExpectedPsqtH2, hiddenBScale, b.h2Bias)
-            || !read_scaled_array<std::int8_t>(
-              rd, std::size_t(kExpectedPsqtH2) * kExpectedPsqtH3, hiddenWScale, b.h3Weight)
-            || !read_scaled_array<std::int32_t>(rd, kExpectedPsqtH3, hiddenBScale, b.h3Bias))
+        if (!read_raw_array<std::int8_t>(rd, std::size_t(kExpectedH1Psqt) * kExpectedPsqtH2, b.h2Weight)
+            || !read_raw_array<std::int32_t>(rd, kExpectedPsqtH2, b.h2Bias)
+            || !read_raw_array<std::int8_t>(rd, std::size_t(kExpectedPsqtH2) * kExpectedPsqtH3, b.h3Weight)
+            || !read_raw_array<std::int32_t>(rd, kExpectedPsqtH3, b.h3Bias))
         {
             err = "Failed reading PSQT bucket tensors";
             return false;
@@ -867,22 +908,20 @@ bool load_payload_dequantized(const std::vector<std::uint8_t>& fileBytes, Networ
 
     for (auto& b : impl.positionalBuckets)
     {
-        if (!read_scaled_array<std::int8_t>(
-              rd, std::size_t(kExpectedH1Pos) * kExpectedPosH2, hiddenWScale, b.h2Weight)
-            || !read_scaled_array<std::int32_t>(rd, kExpectedPosH2, hiddenBScale, b.h2Bias)
-            || !read_scaled_array<std::int8_t>(
-              rd, std::size_t(kExpectedPosH2) * kExpectedPosH3, hiddenWScale, b.h3Weight)
-            || !read_scaled_array<std::int32_t>(rd, kExpectedPosH3, hiddenBScale, b.h3Bias))
+        if (!read_raw_array<std::int8_t>(rd, std::size_t(kExpectedH1Pos) * kExpectedPosH2, b.h2Weight)
+            || !read_raw_array<std::int32_t>(rd, kExpectedPosH2, b.h2Bias)
+            || !read_raw_array<std::int8_t>(rd, std::size_t(kExpectedPosH2) * kExpectedPosH3, b.h3Weight)
+            || !read_raw_array<std::int32_t>(rd, kExpectedPosH3, b.h3Bias))
         {
             err = "Failed reading positional bucket tensors";
             return false;
         }
     }
 
-    if (!read_scaled_array<std::int8_t>(rd, kExpectedPsqtH3, outWScale, impl.psqtOutputWeight)
-        || !read_scaled_scalar_i32(rd, outBScale, impl.psqtOutputBias)
-        || !read_scaled_array<std::int8_t>(rd, kExpectedPosH3, outWScale, impl.positionalOutputWeight)
-        || !read_scaled_scalar_i32(rd, outBScale, impl.positionalOutputBias))
+    if (!read_raw_array<std::int8_t>(rd, kExpectedPsqtH3, impl.psqtOutputWeight)
+        || !read_raw_scalar_i32(rd, impl.psqtOutputBias)
+        || !read_raw_array<std::int8_t>(rd, kExpectedPosH3, impl.positionalOutputWeight)
+        || !read_raw_scalar_i32(rd, impl.positionalOutputBias))
     {
         err = "Failed reading output tensors";
         return false;
@@ -1034,24 +1073,31 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
 
 void apply_h1_feature_delta(const Network::Impl& impl,
                             int                  featureIndex,
-                            float                sign,
-                            std::array<float, kExpectedH1Total>& h1Pre) {
-    const float* row = impl.hidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Total;
+                            int                  sign,
+                            std::array<std::int32_t, kExpectedH1Total>& h1Pre) {
+    const auto* row = impl.hidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Total;
     for (std::size_t j = 0; j < kExpectedH1Total; ++j)
-        h1Pre[j] += sign * row[j];
+        h1Pre[j] += sign * std::int32_t(row[j]);
 }
 
-void refresh_h1_clip(const std::array<float, kExpectedH1Total>& h1Pre,
-                     std::array<float, kExpectedH1Total>&       h1Clip) {
+void refresh_h1_clip(const Network::Impl& impl,
+                     const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
+                     std::array<std::uint8_t, kExpectedH1Total>&       h1Clip) {
+    const std::int32_t ftQuantizedOne     = static_cast<std::int32_t>(std::llround(impl.header.ftQuantizedOne));
+    const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(impl.header.hiddenQuantizedOne));
     for (std::size_t j = 0; j < kExpectedH1Total; ++j)
-        h1Clip[j] = clip01(h1Pre[j]);
+    {
+        const std::int64_t scaled =
+          round_div_symmetric_i64(std::int64_t(h1Pre[j]) * hiddenQuantizedOne, ftQuantizedOne);
+        h1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
+    }
 }
 
 bool apply_piece_toggle(const Network::Impl& impl,
                         Piece                pc,
                         Square               sq,
-                        float                sign,
-                        std::array<float, kExpectedH1Total>& h1Pre) {
+                        int                  sign,
+                        std::array<std::int32_t, kExpectedH1Total>& h1Pre) {
     int idx = -1;
     if (!feature_index_for_piece_square(pc, sq, idx))
         return false;
@@ -1065,58 +1111,68 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     if (state.bucket16 < 0 || state.bucket16 >= int(kExpectedBucketCount))
         return std::nullopt;
 
-    std::array<float, kExpectedPsqtH2> psqtH2{};
-    std::array<float, kExpectedPsqtH3> psqtH3{};
-    std::array<float, kExpectedPosH2>  posH2{};
-    std::array<float, kExpectedPosH3>  posH3{};
+    const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(h.hiddenQuantizedOne));
+    const std::int32_t weightScaleHidden   = static_cast<std::int32_t>(std::llround(h.weightScaleHidden));
+    const std::int64_t outScale =
+      static_cast<std::int64_t>(std::llround(double(h.nnue2score) * double(h.weightScaleOut)));
+
+    std::array<std::uint8_t, kExpectedPsqtH2> psqtH2{};
+    std::array<std::uint8_t, kExpectedPsqtH3> psqtH3{};
+    std::array<std::uint8_t, kExpectedPosH2>  posH2{};
+    std::array<std::uint8_t, kExpectedPosH3>  posH3{};
 
     const auto& psqtB = impl.psqtBuckets[std::size_t(state.bucket16)];
     const auto& posB  = impl.positionalBuckets[std::size_t(state.bucket16)];
 
-    auto dense_layer_clip = [](const float*              input,
-                               std::size_t               inputDim,
-                               std::size_t               outputDim,
-                               const std::vector<float>& weight,
-                               const std::vector<float>& bias,
-                               float*                    out) {
+    auto dense_layer_clip_q = [weightScaleHidden, hiddenQuantizedOne](const std::uint8_t* input,
+                                                                       std::size_t inputDim,
+                                                                       std::size_t outputDim,
+                                                                       const std::vector<std::int8_t>& weight,
+                                                                       const std::vector<std::int32_t>& bias,
+                                                                       std::uint8_t* out) {
         for (std::size_t j = 0; j < outputDim; ++j)
-            out[j] = bias[j];
-
-        for (std::size_t i = 0; i < inputDim; ++i)
         {
-            const float  xi  = input[i];
-            const float* row = weight.data() + i * outputDim;
-            for (std::size_t j = 0; j < outputDim; ++j)
-                out[j] += xi * row[j];
+            std::int64_t acc = bias[j];
+            for (std::size_t i = 0; i < inputDim; ++i)
+            {
+                const auto* row = weight.data() + i * outputDim;
+                acc += std::int64_t(input[i]) * std::int64_t(row[j]);
+            }
+            out[j] = clip_to_hidden_q(round_div_symmetric_i64(acc, weightScaleHidden), hiddenQuantizedOne);
         }
-
-        for (std::size_t j = 0; j < outputDim; ++j)
-            out[j] = clip01(out[j]);
     };
 
-    auto dense_output = [](const float* input, std::size_t inputDim, const std::vector<float>& weight, float bias) {
-        float sum = bias;
+    auto dense_output_acc_q = [](const std::uint8_t* input,
+                                 std::size_t inputDim,
+                                 const std::vector<std::int8_t>& weight,
+                                 std::int32_t bias) {
+        std::int64_t acc = bias;
         for (std::size_t i = 0; i < inputDim; ++i)
-            sum += input[i] * weight[i];
-        return sum;
+            acc += std::int64_t(input[i]) * std::int64_t(weight[i]);
+        return acc;
     };
 
-    dense_layer_clip(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
-                     psqtH2.data());
-    dense_layer_clip(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
-                     psqtH3.data());
-    dense_layer_clip(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
-                     posB.h2Bias, posH2.data());
-    dense_layer_clip(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
+    dense_layer_clip_q(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
+                       psqtH2.data());
+    dense_layer_clip_q(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
+                       psqtH3.data());
+    dense_layer_clip_q(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
+                       posB.h2Bias, posH2.data());
+    dense_layer_clip_q(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
 
-    const float psqtNorm =
-      dense_output(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
-    const float posNorm =
-      dense_output(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
+    const std::int64_t psqtOutAccQ =
+      dense_output_acc_q(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
+    const std::int64_t posOutAccQ =
+      dense_output_acc_q(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
+
+    const float psqtNorm = static_cast<float>(double(psqtOutAccQ) / double(outScale));
+    const float posNorm  = static_cast<float>(double(posOutAccQ) / double(outScale));
 
     Evaluation out;
-    out.psqt       = Value(round_half_away_from_zero(double(psqtNorm) * double(h.labelScalePsqt)));
-    out.positional = Value(round_half_away_from_zero(double(posNorm) * double(h.labelScalePositional)));
+    out.psqt =
+      Value(round_half_away_from_zero(double(psqtOutAccQ) * double(h.labelScalePsqt) / double(outScale)));
+    out.positional =
+      Value(round_half_away_from_zero(double(posOutAccQ) * double(h.labelScalePositional) / double(outScale)));
     out.pieceCount = state.pieceCount;
     out.bucket8    = state.bucket8;
     out.stmBlack   = state.stmBlack;
@@ -1136,8 +1192,8 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
 
     std::copy(impl.hidden1Bias.begin(), impl.hidden1Bias.end(), out.h1Pre.begin());
     for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-        apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1.0f, out.h1Pre);
-    refresh_h1_clip(out.h1Pre, out.h1Clip);
+        apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1, out.h1Pre);
+    refresh_h1_clip(impl, out.h1Pre, out.h1Clip);
 
     out.valid     = true;
     out.key       = key;
@@ -1163,7 +1219,7 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     auto apply_stm_toggle = [&](int newStmBlack) {
         if (newStmBlack == next.stmBlack)
             return true;
-        const float sign = newStmBlack ? +1.0f : -1.0f;
+        const int sign = newStmBlack ? +1 : -1;
         apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
         next.stmBlack = newStmBlack;
         return true;
@@ -1172,7 +1228,7 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     if (dirtyPiece.pc == NO_PIECE || dirtyPiece.from == SQ_NONE)
         return false;
 
-    if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.from, -1.0f, next.h1Pre))
+    if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.from, -1, next.h1Pre))
         return false;
 
     const bool castling = move.type_of() == CASTLING;
@@ -1180,7 +1236,7 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
 
     if (dirtyPiece.to != SQ_NONE)
     {
-        if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.to, +1.0f, next.h1Pre))
+        if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.to, +1, next.h1Pre))
             return false;
     }
 
@@ -1188,21 +1244,21 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     {
         if (dirtyPiece.remove_sq == SQ_NONE || dirtyPiece.add_sq == SQ_NONE)
             return false;
-        if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1.0f, next.h1Pre))
+        if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
             return false;
-        if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1.0f, next.h1Pre))
+        if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
             return false;
     }
     else
     {
         if (capture)
         {
-            if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1.0f, next.h1Pre))
+            if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
                 return false;
         }
         if (dirtyPiece.add_sq != SQ_NONE)
         {
-            if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1.0f, next.h1Pre))
+            if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
                 return false;
         }
     }
@@ -1213,7 +1269,7 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     next.pieceCount = prev.pieceCount - (capture ? 1 : 0);
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key = posAfterMove.key();
-    refresh_h1_clip(next.h1Pre, next.h1Clip);
+    refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
 }
@@ -1230,14 +1286,14 @@ bool advance_incremental_state_null_impl(const Network::Impl&   impl,
     const int newStmBlack = posAfterNull.side_to_move() == BLACK ? 1 : 0;
     if (newStmBlack != next.stmBlack)
     {
-        const float sign = newStmBlack ? +1.0f : -1.0f;
+        const int sign = newStmBlack ? +1 : -1;
         apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
         next.stmBlack = newStmBlack;
     }
 
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key = posAfterNull.key();
-    refresh_h1_clip(next.h1Pre, next.h1Clip);
+    refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
 }

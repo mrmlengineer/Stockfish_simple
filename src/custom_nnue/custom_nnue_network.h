@@ -6,6 +6,7 @@
 #define CUSTOM_NNUE_NETWORK_H_INCLUDED
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -43,8 +44,11 @@ struct IncrementalState {
     int stmBlack   = 0;
     int bucket16   = 0;
 
-    std::array<float, 512> h1Pre{};
-    std::array<float, 512> h1Clip{};
+    // Integer runtime domains (matching Python integer-sim semantics):
+    // - h1Pre: q255 pre-activation accumulator
+    // - h1Clip: q127 clipped activation
+    std::array<std::int32_t, 512> h1Pre{};
+    std::array<std::uint8_t, 512> h1Clip{};
 };
 
 class Network {
