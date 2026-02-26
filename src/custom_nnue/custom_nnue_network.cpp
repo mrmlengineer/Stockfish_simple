@@ -20,6 +20,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(USE_AVX2) && (defined(__AVX2__) || defined(_M_AVX2))
+  #include <immintrin.h>
+  #define CUSTOM_NNUE_HAS_AVX2_INTRINSICS 1
+#else
+  #define CUSTOM_NNUE_HAS_AVX2_INTRINSICS 0
+#endif
+
 #include "../nnue/nnue_common.h"
 #include "../position.h"
 
@@ -102,6 +109,93 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
         return static_cast<std::uint8_t>(hiddenQuantizedOne);
     return static_cast<std::uint8_t>(x);
 }
+
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
+                                   std::size_t                      inputDim,
+                                   const std::vector<std::int8_t>&  weight,
+                                   const std::vector<std::int32_t>& bias,
+                                   std::int32_t                     weightScaleHidden,
+                                   std::int32_t                     hiddenQuantizedOne,
+                                   std::uint8_t*                    out) {
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data()));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 8));
+
+    for (std::size_t i = 0; i < inputDim; ++i)
+    {
+        const std::uint8_t in = input[i];
+        if (!in)
+            continue;
+
+        const __m256i vin16 = _mm256_set1_epi16(static_cast<std::int16_t>(in));
+        const auto*   row   = weight.data() + i * 16;
+
+        const __m128i w8    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row));
+        const __m256i w16   = _mm256_cvtepi8_epi16(w8);
+        const __m256i prod16 = _mm256_mullo_epi16(vin16, w16);
+
+        const __m128i prodLo16 = _mm256_castsi256_si128(prod16);
+        const __m128i prodHi16 = _mm256_extracti128_si256(prod16, 1);
+        acc0                   = _mm256_add_epi32(acc0, _mm256_cvtepi16_epi32(prodLo16));
+        acc1                   = _mm256_add_epi32(acc1, _mm256_cvtepi16_epi32(prodHi16));
+    }
+
+    alignas(32) std::int32_t acc[16];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc), acc0);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
+
+    for (std::size_t j = 0; j < 16; ++j)
+        out[j] =
+          clip_to_hidden_q(round_div_symmetric_i64(std::int64_t(acc[j]), weightScaleHidden),
+                           hiddenQuantizedOne);
+}
+
+void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
+                                   std::size_t                      inputDim,
+                                   const std::vector<std::int8_t>&  weight,
+                                   const std::vector<std::int32_t>& bias,
+                                   std::int32_t                     weightScaleHidden,
+                                   std::int32_t                     hiddenQuantizedOne,
+                                   std::uint8_t*                    out) {
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data()));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 8));
+    __m256i acc2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 16));
+    __m256i acc3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 24));
+
+    for (std::size_t i = 0; i < inputDim; ++i)
+    {
+        const std::uint8_t in = input[i];
+        if (!in)
+            continue;
+
+        const __m256i vin16 = _mm256_set1_epi16(static_cast<std::int16_t>(in));
+        const auto*   row   = weight.data() + i * 32;
+
+        const __m128i w8a    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row));
+        const __m256i w16a   = _mm256_cvtepi8_epi16(w8a);
+        const __m256i prod16a = _mm256_mullo_epi16(vin16, w16a);
+        acc0                  = _mm256_add_epi32(acc0, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(prod16a)));
+        acc1 = _mm256_add_epi32(acc1, _mm256_cvtepi16_epi32(_mm256_extracti128_si256(prod16a, 1)));
+
+        const __m128i w8b    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + 16));
+        const __m256i w16b   = _mm256_cvtepi8_epi16(w8b);
+        const __m256i prod16b = _mm256_mullo_epi16(vin16, w16b);
+        acc2                  = _mm256_add_epi32(acc2, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(prod16b)));
+        acc3 = _mm256_add_epi32(acc3, _mm256_cvtepi16_epi32(_mm256_extracti128_si256(prod16b, 1)));
+    }
+
+    alignas(32) std::int32_t acc[32];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc), acc0);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 16), acc2);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 24), acc3);
+
+    for (std::size_t j = 0; j < 32; ++j)
+        out[j] =
+          clip_to_hidden_q(round_div_symmetric_i64(std::int64_t(acc[j]), weightScaleHidden),
+                           hiddenQuantizedOne);
+}
+#endif
 
 bool parse_positive_int_after_colon(std::string_view s, std::size_t colonPos, int& out) {
     std::size_t i = colonPos + 1;
@@ -1254,6 +1348,21 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
                                                                        const std::vector<std::int8_t>& weight,
                                                                        const std::vector<std::int32_t>& bias,
                                                                        std::uint8_t* out) {
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+        if (outputDim == 16 && bias.size() >= 16 && weight.size() >= inputDim * 16)
+        {
+            dense_layer_clip_q_avx2_out16(input, inputDim, weight, bias, weightScaleHidden,
+                                          hiddenQuantizedOne, out);
+            return;
+        }
+
+        if (outputDim == 32 && bias.size() >= 32 && weight.size() >= inputDim * 32)
+        {
+            dense_layer_clip_q_avx2_out32(input, inputDim, weight, bias, weightScaleHidden,
+                                          hiddenQuantizedOne, out);
+            return;
+        }
+#endif
         // Row-major-friendly accumulation: walk each input row once and update all outputs.
         std::array<std::int64_t, kExpectedPosH3> acc{};
         for (std::size_t j = 0; j < outputDim; ++j)
@@ -1275,11 +1384,28 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
               clip_to_hidden_q(round_div_symmetric_i64(acc[j], weightScaleHidden), hiddenQuantizedOne);
     };
 
-    auto dense_output_acc_q = [](const std::uint8_t* input,
-                                 std::size_t inputDim,
-                                 const std::vector<std::int8_t>& weight,
-                                 std::int32_t bias) {
+    auto dense_output_acc_q = [hiddenQuantizedOne](const std::uint8_t* input,
+                                                   std::size_t inputDim,
+                                                   const std::vector<std::int8_t>& weight,
+                                                   std::int32_t bias) {
         std::int64_t acc = bias;
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+        if (hiddenQuantizedOne <= 127 && inputDim == 32 && weight.size() >= 32)
+        {
+            const __m256i inVec =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input));
+            const __m256i wVec =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weight.data()));
+            const __m256i pairSums16 = _mm256_maddubs_epi16(inVec, wVec);
+            const __m256i laneSums32 = _mm256_madd_epi16(pairSums16, _mm256_set1_epi16(1));
+
+            std::int32_t partial[8];
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(partial), laneSums32);
+            for (int i = 0; i < 8; ++i)
+                acc += partial[i];
+            return acc;
+        }
+#endif
         for (std::size_t i = 0; i < inputDim; ++i)
             acc += std::int64_t(input[i]) * std::int64_t(weight[i]);
         return acc;
