@@ -117,6 +117,18 @@ void accumulate_custom_metrics(CustomNNUEMetrics& dst, const CustomNNUEMetrics& 
     dst.advanceMoveNs += src.advanceMoveNs;
     dst.advanceNullNs += src.advanceNullNs;
     dst.parityDirectEvalNs += src.parityDirectEvalNs;
+    dst.runtime.h1ClipCalls += src.runtime.h1ClipCalls;
+    dst.runtime.h1ClipNs += src.runtime.h1ClipNs;
+    dst.runtime.postH1ForwardCalls += src.runtime.postH1ForwardCalls;
+    dst.runtime.postH1ForwardNs += src.runtime.postH1ForwardNs;
+    dst.runtime.outputConvertCalls += src.runtime.outputConvertCalls;
+    dst.runtime.outputConvertNs += src.runtime.outputConvertNs;
+    dst.runtime.buildPreClipCalls += src.runtime.buildPreClipCalls;
+    dst.runtime.buildPreClipNs += src.runtime.buildPreClipNs;
+    dst.runtime.advanceMovePreClipCalls += src.runtime.advanceMovePreClipCalls;
+    dst.runtime.advanceMovePreClipNs += src.runtime.advanceMovePreClipNs;
+    dst.runtime.advanceNullPreClipCalls += src.runtime.advanceNullPreClipCalls;
+    dst.runtime.advanceNullPreClipNs += src.runtime.advanceNullPreClipNs;
 }
 
 CustomNNUEMetrics diff_custom_metrics(const CustomNNUEMetrics& after, const CustomNNUEMetrics& before) {
@@ -154,6 +166,20 @@ CustomNNUEMetrics diff_custom_metrics(const CustomNNUEMetrics& after, const Cust
     d.advanceMoveNs = after.advanceMoveNs - before.advanceMoveNs;
     d.advanceNullNs = after.advanceNullNs - before.advanceNullNs;
     d.parityDirectEvalNs = after.parityDirectEvalNs - before.parityDirectEvalNs;
+    d.runtime.h1ClipCalls = after.runtime.h1ClipCalls - before.runtime.h1ClipCalls;
+    d.runtime.h1ClipNs = after.runtime.h1ClipNs - before.runtime.h1ClipNs;
+    d.runtime.postH1ForwardCalls = after.runtime.postH1ForwardCalls - before.runtime.postH1ForwardCalls;
+    d.runtime.postH1ForwardNs = after.runtime.postH1ForwardNs - before.runtime.postH1ForwardNs;
+    d.runtime.outputConvertCalls = after.runtime.outputConvertCalls - before.runtime.outputConvertCalls;
+    d.runtime.outputConvertNs = after.runtime.outputConvertNs - before.runtime.outputConvertNs;
+    d.runtime.buildPreClipCalls = after.runtime.buildPreClipCalls - before.runtime.buildPreClipCalls;
+    d.runtime.buildPreClipNs = after.runtime.buildPreClipNs - before.runtime.buildPreClipNs;
+    d.runtime.advanceMovePreClipCalls =
+      after.runtime.advanceMovePreClipCalls - before.runtime.advanceMovePreClipCalls;
+    d.runtime.advanceMovePreClipNs = after.runtime.advanceMovePreClipNs - before.runtime.advanceMovePreClipNs;
+    d.runtime.advanceNullPreClipCalls =
+      after.runtime.advanceNullPreClipCalls - before.runtime.advanceNullPreClipCalls;
+    d.runtime.advanceNullPreClipNs = after.runtime.advanceNullPreClipNs - before.runtime.advanceNullPreClipNs;
     return d;
 }
 
@@ -393,6 +419,8 @@ void Search::Worker::pop_custom_incremental() {
 
 void Search::Worker::start_searching() {
 
+    CustomNNUE::ScopedRuntimeMetricsBinding runtimeMetricsBinding(use_custom_metrics() ? &customMetrics.runtime
+                                                                                       : nullptr);
     accumulatorStack.reset();
     reset_custom_incremental_stack();
     const bool paritySummaryEnabled =
@@ -502,6 +530,18 @@ void Search::Worker::start_searching() {
                   << " search_advance_move_ns=" << metricsSearch.advanceMoveNs
                   << " search_advance_null_ns=" << metricsSearch.advanceNullNs
                   << " search_parity_direct_eval_ns=" << metricsSearch.parityDirectEvalNs
+                  << " search_rt_h1_clip_calls=" << metricsSearch.runtime.h1ClipCalls
+                  << " search_rt_h1_clip_ns=" << metricsSearch.runtime.h1ClipNs
+                  << " search_rt_post_h1_forward_calls=" << metricsSearch.runtime.postH1ForwardCalls
+                  << " search_rt_post_h1_forward_ns=" << metricsSearch.runtime.postH1ForwardNs
+                  << " search_rt_output_convert_calls=" << metricsSearch.runtime.outputConvertCalls
+                  << " search_rt_output_convert_ns=" << metricsSearch.runtime.outputConvertNs
+                  << " search_rt_build_preclip_calls=" << metricsSearch.runtime.buildPreClipCalls
+                  << " search_rt_build_preclip_ns=" << metricsSearch.runtime.buildPreClipNs
+                  << " search_rt_advance_move_preclip_calls=" << metricsSearch.runtime.advanceMovePreClipCalls
+                  << " search_rt_advance_move_preclip_ns=" << metricsSearch.runtime.advanceMovePreClipNs
+                  << " search_rt_advance_null_preclip_calls=" << metricsSearch.runtime.advanceNullPreClipCalls
+                  << " search_rt_advance_null_preclip_ns=" << metricsSearch.runtime.advanceNullPreClipNs
                   << " total_eval_calls=" << metricsAfter.evalCalls
                   << " total_eval_incremental_requested=" << metricsAfter.evalIncrementalRequested
                   << " total_eval_incremental_used=" << metricsAfter.evalIncrementalStateUsed
@@ -532,7 +572,20 @@ void Search::Worker::start_searching() {
                   << " total_build_ns=" << metricsAfter.buildNs
                   << " total_advance_move_ns=" << metricsAfter.advanceMoveNs
                   << " total_advance_null_ns=" << metricsAfter.advanceNullNs
-                  << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs << sync_endl;
+                  << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs
+                  << " total_rt_h1_clip_calls=" << metricsAfter.runtime.h1ClipCalls
+                  << " total_rt_h1_clip_ns=" << metricsAfter.runtime.h1ClipNs
+                  << " total_rt_post_h1_forward_calls=" << metricsAfter.runtime.postH1ForwardCalls
+                  << " total_rt_post_h1_forward_ns=" << metricsAfter.runtime.postH1ForwardNs
+                  << " total_rt_output_convert_calls=" << metricsAfter.runtime.outputConvertCalls
+                  << " total_rt_output_convert_ns=" << metricsAfter.runtime.outputConvertNs
+                  << " total_rt_build_preclip_calls=" << metricsAfter.runtime.buildPreClipCalls
+                  << " total_rt_build_preclip_ns=" << metricsAfter.runtime.buildPreClipNs
+                  << " total_rt_advance_move_preclip_calls=" << metricsAfter.runtime.advanceMovePreClipCalls
+                  << " total_rt_advance_move_preclip_ns=" << metricsAfter.runtime.advanceMovePreClipNs
+                  << " total_rt_advance_null_preclip_calls=" << metricsAfter.runtime.advanceNullPreClipCalls
+                  << " total_rt_advance_null_preclip_ns=" << metricsAfter.runtime.advanceNullPreClipNs
+                  << sync_endl;
     }
 
     // When playing in 'nodes as time' mode, subtract the searched nodes from

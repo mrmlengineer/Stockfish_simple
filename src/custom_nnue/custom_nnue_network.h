@@ -51,6 +51,33 @@ struct IncrementalState {
     std::array<std::uint8_t, 512> h1Clip{};
 };
 
+struct RuntimeMetrics {
+    std::uint64_t h1ClipCalls            = 0;
+    std::uint64_t h1ClipNs               = 0;
+    std::uint64_t postH1ForwardCalls     = 0;
+    std::uint64_t postH1ForwardNs        = 0;
+    std::uint64_t outputConvertCalls     = 0;
+    std::uint64_t outputConvertNs        = 0;
+    std::uint64_t buildPreClipCalls      = 0;
+    std::uint64_t buildPreClipNs         = 0;
+    std::uint64_t advanceMovePreClipCalls = 0;
+    std::uint64_t advanceMovePreClipNs    = 0;
+    std::uint64_t advanceNullPreClipCalls = 0;
+    std::uint64_t advanceNullPreClipNs    = 0;
+};
+
+class ScopedRuntimeMetricsBinding {
+   public:
+    explicit ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) noexcept;
+    ~ScopedRuntimeMetricsBinding() noexcept;
+
+    ScopedRuntimeMetricsBinding(const ScopedRuntimeMetricsBinding&)            = delete;
+    ScopedRuntimeMetricsBinding& operator=(const ScopedRuntimeMetricsBinding&) = delete;
+
+   private:
+    RuntimeMetrics* prev_ = nullptr;
+};
+
 class Network {
    public:
     struct Impl;

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -26,6 +27,8 @@ namespace Stockfish::CustomNNUE {
 
 namespace {
 
+using SteadyClock = std::chrono::steady_clock;
+
 constexpr std::uint32_t kExpectedInputSize   = 737;
 constexpr std::uint32_t kExpectedBucketCount = 16;
 constexpr std::uint32_t kExpectedH1Total     = 512;
@@ -45,6 +48,35 @@ constexpr std::size_t   kNnuexHeaderSize          = 256;
 constexpr std::uint32_t kNnuexVersion             = 1;
 constexpr char          kNnuexMagic[8]            = {'C', 'D', 'N', 'N', 'U', 'E', 'X', '1'};
 constexpr int           kDefaultEngineValueOutputScale = 1;
+
+thread_local RuntimeMetrics* gRuntimeMetricsSink = nullptr;
+
+struct ScopedRuntimeMetricTimer {
+    explicit ScopedRuntimeMetricTimer(std::uint64_t* dst_) : dst(dst_) {
+        if (dst)
+            start = SteadyClock::now();
+    }
+
+    ~ScopedRuntimeMetricTimer() {
+        if (dst)
+            *dst += std::uint64_t(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - start).count());
+    }
+
+    std::uint64_t*          dst   = nullptr;
+    SteadyClock::time_point start = {};
+};
+
+}  // namespace
+
+ScopedRuntimeMetricsBinding::ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) noexcept :
+    prev_(gRuntimeMetricsSink) {
+    gRuntimeMetricsSink = sink;
+}
+
+ScopedRuntimeMetricsBinding::~ScopedRuntimeMetricsBinding() noexcept { gRuntimeMetricsSink = prev_; }
+
+namespace {
 
 inline float clip01(float x) {
     return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
@@ -1170,6 +1202,11 @@ void apply_h1_feature_delta(const Network::Impl& impl,
 void refresh_h1_clip(const Network::Impl& impl,
                      const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
                      std::array<std::uint8_t, kExpectedH1Total>&       h1Clip) {
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->h1ClipCalls;
+    ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->h1ClipNs : nullptr);
+
     const std::int32_t ftQuantizedOne     = static_cast<std::int32_t>(std::llround(impl.header.ftQuantizedOne));
     const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(impl.header.hiddenQuantizedOne));
     for (std::size_t j = 0; j < kExpectedH1Total; ++j)
@@ -1217,16 +1254,25 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
                                                                        const std::vector<std::int8_t>& weight,
                                                                        const std::vector<std::int32_t>& bias,
                                                                        std::uint8_t* out) {
+        // Row-major-friendly accumulation: walk each input row once and update all outputs.
+        std::array<std::int64_t, kExpectedPosH3> acc{};
         for (std::size_t j = 0; j < outputDim; ++j)
+            acc[j] = bias[j];
+
+        for (std::size_t i = 0; i < inputDim; ++i)
         {
-            std::int64_t acc = bias[j];
-            for (std::size_t i = 0; i < inputDim; ++i)
-            {
-                const auto* row = weight.data() + i * outputDim;
-                acc += std::int64_t(input[i]) * std::int64_t(row[j]);
-            }
-            out[j] = clip_to_hidden_q(round_div_symmetric_i64(acc, weightScaleHidden), hiddenQuantizedOne);
+            const std::uint8_t in = input[i];
+            if (!in)
+                continue;
+
+            const auto* row = weight.data() + i * outputDim;
+            for (std::size_t j = 0; j < outputDim; ++j)
+                acc[j] += std::int64_t(in) * std::int64_t(row[j]);
         }
+
+        for (std::size_t j = 0; j < outputDim; ++j)
+            out[j] =
+              clip_to_hidden_q(round_div_symmetric_i64(acc[j], weightScaleHidden), hiddenQuantizedOne);
     };
 
     auto dense_output_acc_q = [](const std::uint8_t* input,
@@ -1239,18 +1285,30 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
         return acc;
     };
 
-    dense_layer_clip_q(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
-                       psqtH2.data());
-    dense_layer_clip_q(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
-                       psqtH3.data());
-    dense_layer_clip_q(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
-                       posB.h2Bias, posH2.data());
-    dense_layer_clip_q(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    std::int64_t    psqtOutAccQ = 0;
+    std::int64_t    posOutAccQ  = 0;
 
-    const std::int64_t psqtOutAccQ =
-      dense_output_acc_q(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
-    const std::int64_t posOutAccQ =
-      dense_output_acc_q(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
+    if (metrics)
+        ++metrics->postH1ForwardCalls;
+    {
+        ScopedRuntimeMetricTimer postH1Timer(metrics ? &metrics->postH1ForwardNs : nullptr);
+        dense_layer_clip_q(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
+                           psqtH2.data());
+        dense_layer_clip_q(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
+                           psqtH3.data());
+        dense_layer_clip_q(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
+                           posB.h2Bias, posH2.data());
+        dense_layer_clip_q(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
+
+        psqtOutAccQ = dense_output_acc_q(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
+        posOutAccQ =
+          dense_output_acc_q(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
+    }
+
+    if (metrics)
+        ++metrics->outputConvertCalls;
+    ScopedRuntimeMetricTimer outputConvertTimer(metrics ? &metrics->outputConvertNs : nullptr);
 
     const float psqtNorm = static_cast<float>(double(psqtOutAccQ) / double(outScale));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(outScale));
@@ -1281,9 +1339,15 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
     if (enc.bucket16 < 0 || enc.bucket16 >= int(kExpectedBucketCount))
         return false;
 
-    std::copy(impl.hidden1Bias.begin(), impl.hidden1Bias.end(), out.h1Pre.begin());
-    for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-        apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1, out.h1Pre);
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->buildPreClipCalls;
+    {
+        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->buildPreClipNs : nullptr);
+        std::copy(impl.hidden1Bias.begin(), impl.hidden1Bias.end(), out.h1Pre.begin());
+        for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+            apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1, out.h1Pre);
+    }
     refresh_h1_clip(impl, out.h1Pre, out.h1Clip);
 
     out.valid     = true;
@@ -1319,43 +1383,49 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     if (dirtyPiece.pc == NO_PIECE || dirtyPiece.from == SQ_NONE)
         return false;
 
-    if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.from, -1, next.h1Pre))
-        return false;
-
     const bool castling = move.type_of() == CASTLING;
     const bool capture  = dirtyPiece.remove_sq != SQ_NONE && !castling;
 
-    if (dirtyPiece.to != SQ_NONE)
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->advanceMovePreClipCalls;
     {
-        if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.to, +1, next.h1Pre))
+        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceMovePreClipNs : nullptr);
+        if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.from, -1, next.h1Pre))
             return false;
-    }
 
-    if (castling)
-    {
-        if (dirtyPiece.remove_sq == SQ_NONE || dirtyPiece.add_sq == SQ_NONE)
-            return false;
-        if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
-            return false;
-        if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
-            return false;
-    }
-    else
-    {
-        if (capture)
+        if (dirtyPiece.to != SQ_NONE)
         {
-            if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
+            if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.to, +1, next.h1Pre))
                 return false;
         }
-        if (dirtyPiece.add_sq != SQ_NONE)
+
+        if (castling)
         {
+            if (dirtyPiece.remove_sq == SQ_NONE || dirtyPiece.add_sq == SQ_NONE)
+                return false;
+            if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
+                return false;
             if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
                 return false;
         }
-    }
+        else
+        {
+            if (capture)
+            {
+                if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
+                    return false;
+            }
+            if (dirtyPiece.add_sq != SQ_NONE)
+            {
+                if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
+                    return false;
+            }
+        }
 
-    if (!apply_stm_toggle(posAfterMove.side_to_move() == BLACK ? 1 : 0))
-        return false;
+        if (!apply_stm_toggle(posAfterMove.side_to_move() == BLACK ? 1 : 0))
+            return false;
+    }
 
     next.pieceCount = prev.pieceCount - (capture ? 1 : 0);
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
@@ -1374,12 +1444,18 @@ bool advance_incremental_state_null_impl(const Network::Impl&   impl,
     next = prev;
     next.valid = false;
 
-    const int newStmBlack = posAfterNull.side_to_move() == BLACK ? 1 : 0;
-    if (newStmBlack != next.stmBlack)
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->advanceNullPreClipCalls;
     {
-        const int sign = newStmBlack ? +1 : -1;
-        apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
-        next.stmBlack = newStmBlack;
+        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
+        const int newStmBlack = posAfterNull.side_to_move() == BLACK ? 1 : 0;
+        if (newStmBlack != next.stmBlack)
+        {
+            const int sign = newStmBlack ? +1 : -1;
+            apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
+            next.stmBlack = newStmBlack;
+        }
     }
 
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);

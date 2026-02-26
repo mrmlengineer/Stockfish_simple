@@ -297,6 +297,7 @@ struct CustomNNUEMetrics {
     std::uint64_t advanceMoveNs                    = 0;
     std::uint64_t advanceNullNs                    = 0;
     std::uint64_t parityDirectEvalNs               = 0;
+    CustomNNUE::RuntimeMetrics runtime{};
 };
 
 // Search::Worker is the class that does the actual search.
