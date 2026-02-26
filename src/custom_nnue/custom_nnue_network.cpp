@@ -111,6 +111,47 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
 }
 
 #if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
+                                        std::size_t         count,
+                                        std::int32_t        denom,
+                                        std::int32_t        hiddenQuantizedOne,
+                                        std::uint8_t*       out) {
+    if (denom <= 0 || hiddenQuantizedOne <= 0 || hiddenQuantizedOne > 255)
+    {
+        for (std::size_t j = 0; j < count; ++j)
+            out[j] =
+              clip_to_hidden_q(round_div_symmetric_i64(std::int64_t(acc[j]), denom), hiddenQuantizedOne);
+        return;
+    }
+
+    const __m256i zero32    = _mm256_setzero_si256();
+    const __m256d denomD    = _mm256_set1_pd(double(denom));
+    const __m256d halfD     = _mm256_set1_pd(double(denom / 2));
+    const __m256d zeroD     = _mm256_setzero_pd();
+    const __m256d hiddenQD  = _mm256_set1_pd(double(hiddenQuantizedOne));
+
+    for (std::size_t j = 0; j < count; j += 8)
+    {
+        const __m256i x32    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + j));
+        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);
+
+        const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
+        const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+
+        __m256d qLo = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosLo), halfD), denomD);
+        __m256d qHi = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosHi), halfD), denomD);
+
+        qLo = _mm256_min_pd(_mm256_max_pd(qLo, zeroD), hiddenQD);
+        qHi = _mm256_min_pd(_mm256_max_pd(qHi, zeroD), hiddenQD);
+
+        const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
+        const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
+        const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
+        const __m128i q8    = _mm_packus_epi16(q16, q16);
+        _mm_storel_epi64(reinterpret_cast<__m128i*>(out + j), q8);
+    }
+}
+
 void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
                                    std::size_t                      inputDim,
                                    const std::vector<std::int8_t>&  weight,
@@ -143,11 +184,7 @@ void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
     alignas(32) std::int32_t acc[16];
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc), acc0);
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
-
-    for (std::size_t j = 0; j < 16; ++j)
-        out[j] =
-          clip_to_hidden_q(round_div_symmetric_i64(std::int64_t(acc[j]), weightScaleHidden),
-                           hiddenQuantizedOne);
+    quantize_clip_i32_to_u8_avx2_exact(acc, 16, weightScaleHidden, hiddenQuantizedOne, out);
 }
 
 void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
@@ -189,11 +226,7 @@ void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 16), acc2);
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 24), acc3);
-
-    for (std::size_t j = 0; j < 32; ++j)
-        out[j] =
-          clip_to_hidden_q(round_div_symmetric_i64(std::int64_t(acc[j]), weightScaleHidden),
-                           hiddenQuantizedOne);
+    quantize_clip_i32_to_u8_avx2_exact(acc, 32, weightScaleHidden, hiddenQuantizedOne, out);
 }
 #endif
 
