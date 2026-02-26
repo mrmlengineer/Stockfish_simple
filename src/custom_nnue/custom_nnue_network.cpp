@@ -1293,6 +1293,46 @@ void apply_h1_feature_delta(const Network::Impl& impl,
         h1Pre[j] += sign * std::int32_t(row[j]);
 }
 
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+void refresh_h1_clip_avx2_exact(const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
+                                std::array<std::uint8_t, kExpectedH1Total>&       h1Clip,
+                                std::int32_t                                       ftQuantizedOne,
+                                std::int32_t                                       hiddenQuantizedOne) {
+    const __m256i zero32     = _mm256_setzero_si256();
+    const __m256d hiddenQd   = _mm256_set1_pd(double(hiddenQuantizedOne));
+    const __m256d hiddenQ0d  = _mm256_setzero_pd();
+    const __m256d denomD     = _mm256_set1_pd(double(ftQuantizedOne));
+    const __m256d halfD      = _mm256_set1_pd(double(ftQuantizedOne / 2));
+
+    for (std::size_t j = 0; j < kExpectedH1Total; j += 8)
+    {
+        const __m256i x32    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(h1Pre.data() + j));
+        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);
+
+        const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
+        const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+
+        __m256d qLo = _mm256_div_pd(
+          _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
+        __m256d qHi = _mm256_div_pd(
+          _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
+
+        // Clamp in double before int conversion. This preserves exact output semantics:
+        // negatives are already clamped to zero (equivalent after final clip), and any
+        // value above hiddenQuantizedOne saturates to hiddenQuantizedOne before packing.
+        qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
+        qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
+
+        const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
+        const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
+        const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
+        const __m128i q8    = _mm_packus_epi16(q16, q16);
+
+        _mm_storel_epi64(reinterpret_cast<__m128i*>(h1Clip.data() + j), q8);
+    }
+}
+#endif
+
 void refresh_h1_clip(const Network::Impl& impl,
                      const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
                      std::array<std::uint8_t, kExpectedH1Total>&       h1Clip) {
@@ -1303,6 +1343,13 @@ void refresh_h1_clip(const Network::Impl& impl,
 
     const std::int32_t ftQuantizedOne     = static_cast<std::int32_t>(std::llround(impl.header.ftQuantizedOne));
     const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(impl.header.hiddenQuantizedOne));
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+    if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
+    {
+        refresh_h1_clip_avx2_exact(h1Pre, h1Clip, ftQuantizedOne, hiddenQuantizedOne);
+        return;
+    }
+#endif
     for (std::size_t j = 0; j < kExpectedH1Total; ++j)
     {
         const std::int64_t scaled =
