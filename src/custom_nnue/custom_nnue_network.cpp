@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "../nnue/nnue_common.h"
 #include "../position.h"
 
 namespace Stockfish::CustomNNUE {
@@ -43,6 +44,7 @@ constexpr std::uint32_t kExpectedOutputUnitType   = 1;
 constexpr std::size_t   kNnuexHeaderSize          = 256;
 constexpr std::uint32_t kNnuexVersion             = 1;
 constexpr char          kNnuexMagic[8]            = {'C', 'D', 'N', 'N', 'U', 'E', 'X', '1'};
+constexpr int           kDefaultEngineValueOutputScale = 1;
 
 inline float clip01(float x) {
     return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
@@ -69,6 +71,62 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
     return static_cast<std::uint8_t>(x);
 }
 
+bool parse_positive_int_after_colon(std::string_view s, std::size_t colonPos, int& out) {
+    std::size_t i = colonPos + 1;
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+        ++i;
+    if (i >= s.size())
+        return false;
+
+    bool negative = false;
+    if (s[i] == '+' || s[i] == '-')
+    {
+        negative = (s[i] == '-');
+        ++i;
+    }
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i])))
+        return false;
+
+    long long value = 0;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+    {
+        value = value * 10 + (s[i] - '0');
+        if (value > 1'000'000)
+            return false;
+        ++i;
+    }
+    if (negative)
+        value = -value;
+    if (value <= 0)
+        return false;
+    out = static_cast<int>(value);
+    return true;
+}
+
+bool try_parse_engine_value_output_scale_from_metadata(std::string_view metadataJson, int& outScale) {
+    constexpr std::string_view key = "\"engine_value_output_scale\"";
+    const std::size_t          keyPos = metadataJson.find(key);
+    if (keyPos == std::string_view::npos)
+        return false;
+
+    const std::size_t colonPos = metadataJson.find(':', keyPos + key.size());
+    if (colonPos == std::string_view::npos)
+        return false;
+
+    int parsed = 0;
+    if (!parse_positive_int_after_colon(metadataJson, colonPos, parsed))
+        return false;
+    outScale = parsed;
+    return true;
+}
+
+struct Header;
+
+bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t>& fileBytes,
+                                                  const Header&                    h,
+                                                  int&                             outScale,
+                                                  std::string&                     err);
+
 struct Header {
     std::array<char, 8> magic{};
     std::uint32_t       version = 0, headerSize = 0, flags = 0, featureVariantId = 0,
@@ -84,6 +142,32 @@ struct Header {
     std::array<std::uint8_t, 32> metadataJsonSha256{};
     std::uint32_t manifestFormatVersion = 0, npzSchemaVersion = 0;
 };
+
+bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t>& fileBytes,
+                                                  const Header&                    h,
+                                                  int&                             outScale,
+                                                  std::string&                     err) {
+    outScale = kDefaultEngineValueOutputScale;
+    if ((h.flags & 1u) == 0 || h.metadataJsonBytes == 0)
+        return true;
+
+    const std::uint64_t metaOffset = std::uint64_t(h.headerSize) + h.tensorPayloadBytes;
+    const std::uint64_t metaEnd    = metaOffset + h.metadataJsonBytes;
+    if (metaEnd > fileBytes.size())
+    {
+        err = "Truncated metadata JSON blob";
+        return false;
+    }
+
+    const auto* data = reinterpret_cast<const char*>(fileBytes.data() + std::size_t(metaOffset));
+    std::string_view metadataJson(data, std::size_t(h.metadataJsonBytes));
+
+    // Metadata parsing is best-effort for backward compatibility. If the key is absent, fall back to legacy scale=1.
+    int parsedScale = 0;
+    if (try_parse_engine_value_output_scale_from_metadata(metadataJson, parsedScale))
+        outScale = parsedScale;
+    return true;
+}
 
 class ByteReader {
    public:
@@ -539,6 +623,7 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
+    int    engineValueOutputScale = kDefaultEngineValueOutputScale;
 
     std::vector<std::int16_t> hidden1Weight;
     std::vector<std::int16_t> hidden1Bias;
@@ -643,6 +728,8 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
         return false;
     if (!verify_file_checksums(bytes, newImpl->header, err))
         return false;
+    if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
+        return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
         return false;
 
@@ -707,7 +794,7 @@ void Network::verify(std::string evalfilePath,
        << " buckets=" << h.bucketCount << " h1=" << h.hidden1Total << " (" << h.hidden1Psqt << "+"
        << h.hidden1Positional << ")"
        << " | outputs=" << h.outputs << " | label_scales=" << h.labelScalePsqt << ","
-       << h.labelScalePositional;
+       << h.labelScalePositional << " | engine_output_scale=" << impl_->engineValueOutputScale;
     if (impl_->metadataJsonPresent)
         ss << " | metadata-json";
     ss << " | checksum=ok(payload";
@@ -1168,11 +1255,15 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     const float psqtNorm = static_cast<float>(double(psqtOutAccQ) / double(outScale));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(outScale));
 
+    const auto psqtHeadCpRaw =
+      round_half_away_from_zero(double(psqtOutAccQ) * double(h.labelScalePsqt) / double(outScale));
+    const auto posHeadCpRaw =
+      round_half_away_from_zero(double(posOutAccQ) * double(h.labelScalePositional) / double(outScale));
+
     Evaluation out;
-    out.psqt =
-      Value(round_half_away_from_zero(double(psqtOutAccQ) * double(h.labelScalePsqt) / double(outScale)));
-    out.positional =
-      Value(round_half_away_from_zero(double(posOutAccQ) * double(h.labelScalePositional) / double(outScale)));
+    // Optional metadata-driven engine-facing output compression (legacy nets omit it => scale=1).
+    out.psqt       = Value(psqtHeadCpRaw / impl.engineValueOutputScale);
+    out.positional = Value(posHeadCpRaw / impl.engineValueOutputScale);
     out.pieceCount = state.pieceCount;
     out.bucket8    = state.bucket8;
     out.stmBlack   = state.stmBlack;
