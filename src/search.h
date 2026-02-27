@@ -344,6 +344,7 @@ class Worker {
     void do_null_move(Position& pos, StateInfo& st, Stack* const ss);
     void undo_move(Position& pos, const Move move);
     void undo_null_move(Position& pos);
+    void refresh_custom_option_cache();
     bool use_custom_incremental_mode() const;
     bool use_custom_metrics() const;
     void reset_custom_incremental_stack();
@@ -412,6 +413,9 @@ class Worker {
     std::uint64_t                                                 customParityChecks     = 0;
     std::uint64_t                                                 customParityMismatches = 0;
     std::uint64_t                                                 customParityLogs       = 0;
+    bool                                                          customIncrementalEnabledCached = false;
+    bool                                                          customMetricsEnabledCached     = false;
+    bool                                                          customParityEnabledCached      = false;
     CustomNNUEMetrics                                             customMetrics{};
 
     friend class Stockfish::ThreadPool;

@@ -297,12 +297,19 @@ void Search::Worker::ensure_network_replicated() {
     (void) (customNetworks[numaAccessToken]);
 }
 
+void Search::Worker::refresh_custom_option_cache() {
+    customIncrementalEnabledCached = options.count("NNUEMode") && options["NNUEMode"] == "incremental";
+    customMetricsEnabledCached = options.count("NNUEMetrics") && int(options["NNUEMetrics"]) != 0;
+    customParityEnabledCached = customIncrementalEnabledCached && options.count("NNUEParityCheck")
+                             && int(options["NNUEParityCheck"]) != 0;
+}
+
 bool Search::Worker::use_custom_incremental_mode() const {
-    return options.count("NNUEMode") && options["NNUEMode"] == "incremental";
+    return customIncrementalEnabledCached;
 }
 
 bool Search::Worker::use_custom_metrics() const {
-    return options.count("NNUEMetrics") && int(options["NNUEMetrics"]) != 0;
+    return customMetricsEnabledCached;
 }
 
 void Search::Worker::reset_custom_incremental_stack() {
@@ -422,13 +429,13 @@ void Search::Worker::pop_custom_incremental() {
 
 void Search::Worker::start_searching() {
 
-    CustomNNUE::ScopedRuntimeMetricsBinding runtimeMetricsBinding(use_custom_metrics() ? &customMetrics.runtime
-                                                                                       : nullptr);
+    refresh_custom_option_cache();
+    CustomNNUE::ScopedRuntimeMetricsBinding runtimeMetricsBinding(
+      customMetricsEnabledCached ? &customMetrics.runtime : nullptr);
     accumulatorStack.reset();
     reset_custom_incremental_stack();
-    const bool paritySummaryEnabled =
-      use_custom_incremental_mode() && options.count("NNUEParityCheck") && int(options["NNUEParityCheck"]) != 0;
-    const bool metricsSummaryEnabled = use_custom_metrics();
+    const bool paritySummaryEnabled  = customParityEnabledCached;
+    const bool metricsSummaryEnabled = customMetricsEnabledCached;
     auto parity_totals = [&]() {
         std::pair<std::uint64_t, std::uint64_t> totals{0, 0};
         for (const auto& th : threads)
@@ -970,6 +977,7 @@ void Search::Worker::clear() {
     ttMoveHistory = 0;
     customAccumulatorSize = 0;
     customParityChecks = customParityMismatches = customParityLogs = 0;
+    customIncrementalEnabledCached = customMetricsEnabledCached = customParityEnabledCached = false;
     customMetrics = {};
 
     for (auto& to : continuationCorrectionHistory)
@@ -2131,12 +2139,10 @@ TimePoint Search::Worker::elapsed() const {
 TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elapsed_time(); }
 
 Value Search::Worker::evaluate(const Position& pos) {
-    const bool incrementalRequested =
-      options.count("NNUEMode") && options["NNUEMode"] == "incremental";
+    const bool incrementalRequested = customIncrementalEnabledCached;
     auto&      net = customNetworks[numaAccessToken];
-    const bool parityCheckEnabled =
-      incrementalRequested && options.count("NNUEParityCheck") && int(options["NNUEParityCheck"]) != 0;
-    const bool metricsEnabled = use_custom_metrics();
+    const bool parityCheckEnabled = customParityEnabledCached;
+    const bool metricsEnabled     = customMetricsEnabledCached;
 
     if (metricsEnabled)
     {
