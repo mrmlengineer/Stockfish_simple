@@ -406,11 +406,13 @@ class Worker {
     // Used by NNUE
     Eval::NNUE::AccumulatorStack  accumulatorStack;
     Eval::NNUE::AccumulatorCaches refreshTable;
-    std::vector<CustomNNUE::IncrementalState> customAccumulatorStack;
-    std::uint64_t                              customParityChecks     = 0;
-    std::uint64_t                              customParityMismatches = 0;
-    std::uint64_t                              customParityLogs       = 0;
-    CustomNNUEMetrics                          customMetrics{};
+    static constexpr std::size_t  customAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
+    std::array<CustomNNUE::IncrementalState, customAccumulatorCapacity> customAccumulatorStack{};
+    std::size_t                                                   customAccumulatorSize = 0;
+    std::uint64_t                                                 customParityChecks     = 0;
+    std::uint64_t                                                 customParityMismatches = 0;
+    std::uint64_t                                                 customParityLogs       = 0;
+    CustomNNUEMetrics                                             customMetrics{};
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

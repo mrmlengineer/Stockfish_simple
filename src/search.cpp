@@ -306,11 +306,12 @@ bool Search::Worker::use_custom_metrics() const {
 }
 
 void Search::Worker::reset_custom_incremental_stack() {
-    customAccumulatorStack.clear();
+    customAccumulatorSize = 0;
     if (!use_custom_incremental_mode())
         return;
 
-    customAccumulatorStack.resize(1);
+    customAccumulatorSize = 1;
+    customAccumulatorStack[0] = CustomNNUE::IncrementalState{};
     auto& net = customNetworks[numaAccessToken];
     const bool metricsEnabled = use_custom_metrics();
     if (metricsEnabled)
@@ -333,26 +334,27 @@ void Search::Worker::push_custom_incremental_move(const Position& posAfterMove,
                                                   const DirtyPiece& dirtyPiece) {
     if (!use_custom_incremental_mode())
         return;
+    if (customAccumulatorSize == 0)
+        return;
+    assert(customAccumulatorSize < customAccumulatorStack.size());
 
-    auto&                       net = customNetworks[numaAccessToken];
-    CustomNNUE::IncrementalState next;
+    auto&                       net  = customNetworks[numaAccessToken];
+    const auto&                 prev = customAccumulatorStack[customAccumulatorSize - 1];
+    auto&                       next = customAccumulatorStack[customAccumulatorSize];
+    next = CustomNNUE::IncrementalState{};
     bool                        ok = false;
     const bool                  metricsEnabled = use_custom_metrics();
 
-    if (!customAccumulatorStack.empty())
+    if (prev.valid)
     {
-        const auto& prev = customAccumulatorStack.back();
-        if (prev.valid)
+        if (metricsEnabled)
+            ++customMetrics.moveAdvanceCalls;
         {
-            if (metricsEnabled)
-                ++customMetrics.moveAdvanceCalls;
-            {
-                ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceMoveNs : nullptr);
-                ok = net.advance_incremental_state(posAfterMove, move, dirtyPiece, prev, next);
-            }
-            if (!ok && metricsEnabled)
-                ++customMetrics.moveAdvanceFails;
+            ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceMoveNs : nullptr);
+            ok = net.advance_incremental_state(posAfterMove, move, dirtyPiece, prev, next);
         }
+        if (!ok && metricsEnabled)
+            ++customMetrics.moveAdvanceFails;
     }
     if (!ok)
     {
@@ -368,32 +370,33 @@ void Search::Worker::push_custom_incremental_move(const Position& posAfterMove,
     if (!ok)
         next.valid = false;
 
-    customAccumulatorStack.push_back(std::move(next));
+    ++customAccumulatorSize;
 }
 
 void Search::Worker::push_custom_incremental_null(const Position& posAfterNull) {
     if (!use_custom_incremental_mode())
         return;
+    if (customAccumulatorSize == 0)
+        return;
+    assert(customAccumulatorSize < customAccumulatorStack.size());
 
-    auto&                       net = customNetworks[numaAccessToken];
-    CustomNNUE::IncrementalState next;
+    auto&                       net  = customNetworks[numaAccessToken];
+    const auto&                 prev = customAccumulatorStack[customAccumulatorSize - 1];
+    auto&                       next = customAccumulatorStack[customAccumulatorSize];
+    next = CustomNNUE::IncrementalState{};
     bool                        ok = false;
     const bool                  metricsEnabled = use_custom_metrics();
 
-    if (!customAccumulatorStack.empty())
+    if (prev.valid)
     {
-        const auto& prev = customAccumulatorStack.back();
-        if (prev.valid)
+        if (metricsEnabled)
+            ++customMetrics.nullAdvanceCalls;
         {
-            if (metricsEnabled)
-                ++customMetrics.nullAdvanceCalls;
-            {
-                ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceNullNs : nullptr);
-                ok = net.advance_incremental_state_null(posAfterNull, prev, next);
-            }
-            if (!ok && metricsEnabled)
-                ++customMetrics.nullAdvanceFails;
+            ScopedNsTimer timer(metricsEnabled ? &customMetrics.advanceNullNs : nullptr);
+            ok = net.advance_incremental_state_null(posAfterNull, prev, next);
         }
+        if (!ok && metricsEnabled)
+            ++customMetrics.nullAdvanceFails;
     }
     if (!ok)
     {
@@ -409,12 +412,12 @@ void Search::Worker::push_custom_incremental_null(const Position& posAfterNull) 
     if (!ok)
         next.valid = false;
 
-    customAccumulatorStack.push_back(std::move(next));
+    ++customAccumulatorSize;
 }
 
 void Search::Worker::pop_custom_incremental() {
-    if (customAccumulatorStack.size() > 1)
-        customAccumulatorStack.pop_back();
+    if (customAccumulatorSize > 1)
+        --customAccumulatorSize;
 }
 
 void Search::Worker::start_searching() {
@@ -965,7 +968,7 @@ void Search::Worker::clear() {
     sharedHistory.pawnHistory.clear_range(-1238, numaThreadIdx, numaTotal);
 
     ttMoveHistory = 0;
-    customAccumulatorStack.clear();
+    customAccumulatorSize = 0;
     customParityChecks = customParityMismatches = customParityLogs = 0;
     customMetrics = {};
 
@@ -2146,9 +2149,9 @@ Value Search::Worker::evaluate(const Position& pos) {
     if (incrementalRequested)
     {
         CustomNNUE::IncrementalState* inc = nullptr;
-        if (!customAccumulatorStack.empty())
+        if (customAccumulatorSize > 0)
         {
-            auto& top = customAccumulatorStack.back();
+            auto& top = customAccumulatorStack[customAccumulatorSize - 1];
             if (!top.valid || top.key != pos.key())
             {
                 if (metricsEnabled)
@@ -2219,18 +2222,19 @@ Value Search::Worker::evaluate(const Position& pos) {
             {
                 ++customParityMismatches;
 
-                if (!customAccumulatorStack.empty())
+                if (customAccumulatorSize > 0)
                 {
+                    auto& top = customAccumulatorStack[customAccumulatorSize - 1];
                     if (metricsEnabled)
                         ++customMetrics.parityMismatchRebuildCalls;
                     bool rebuilt = false;
                     {
                         ScopedNsTimer timer(metricsEnabled ? &customMetrics.buildNs : nullptr);
-                        rebuilt = net.build_incremental_state(pos, customAccumulatorStack.back());
+                        rebuilt = net.build_incremental_state(pos, top);
                     }
                     if (!rebuilt)
                     {
-                        customAccumulatorStack.back().valid = false;
+                        top.valid = false;
                         if (metricsEnabled)
                             ++customMetrics.parityMismatchRebuildFails;
                     }

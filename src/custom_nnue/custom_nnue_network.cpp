@@ -1749,8 +1749,13 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
     if (!prev.valid)
         return false;
 
-    next = prev;
-    next.valid = false;
+    next.valid     = false;
+    next.key       = prev.key;
+    next.pieceCount = prev.pieceCount;
+    next.bucket8    = prev.bucket8;
+    next.stmBlack   = prev.stmBlack;
+    next.bucket16   = prev.bucket16;
+    next.h1Pre      = prev.h1Pre;
 
     auto apply_stm_toggle = [&](int newStmBlack) {
         if (newStmBlack == next.stmBlack)
@@ -1822,8 +1827,13 @@ bool advance_incremental_state_null_impl(const Network::Impl&   impl,
                                          IncrementalState&      next) {
     if (!prev.valid)
         return false;
-    next = prev;
-    next.valid = false;
+    next.valid     = false;
+    next.key       = prev.key;
+    next.pieceCount = prev.pieceCount;
+    next.bucket8    = prev.bucket8;
+    next.stmBlack   = prev.stmBlack;
+    next.bucket16   = prev.bucket16;
+    next.h1Pre      = prev.h1Pre;
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     if (metrics)
