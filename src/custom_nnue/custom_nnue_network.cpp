@@ -153,14 +153,14 @@ void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
 }
 
 void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
-                                   std::size_t                      inputDim,
-                                   const std::vector<std::int8_t>&  weight,
-                                   const std::vector<std::int32_t>& bias,
-                                   std::int32_t                     weightScaleHidden,
-                                   std::int32_t                     hiddenQuantizedOne,
-                                   std::uint8_t*                    out) {
-    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data()));
-    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 8));
+                                    std::size_t                      inputDim,
+                                    const std::int8_t*               weight,
+                                    const std::int32_t*              bias,
+                                    std::int32_t                     weightScaleHidden,
+                                    std::int32_t                     hiddenQuantizedOne,
+                                    std::uint8_t*                    out) {
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
 
     for (std::size_t i = 0; i < inputDim; ++i)
     {
@@ -169,7 +169,7 @@ void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
             continue;
 
         const __m256i vin16 = _mm256_set1_epi16(static_cast<std::int16_t>(in));
-        const auto*   row   = weight.data() + i * 16;
+        const auto*   row   = weight + i * 16;
 
         const __m128i w8    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row));
         const __m256i w16   = _mm256_cvtepi8_epi16(w8);
@@ -188,16 +188,16 @@ void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
 }
 
 void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
-                                   std::size_t                      inputDim,
-                                   const std::vector<std::int8_t>&  weight,
-                                   const std::vector<std::int32_t>& bias,
-                                   std::int32_t                     weightScaleHidden,
-                                   std::int32_t                     hiddenQuantizedOne,
-                                   std::uint8_t*                    out) {
-    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data()));
-    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 8));
-    __m256i acc2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 16));
-    __m256i acc3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias.data() + 24));
+                                    std::size_t                      inputDim,
+                                    const std::int8_t*               weight,
+                                    const std::int32_t*              bias,
+                                    std::int32_t                     weightScaleHidden,
+                                    std::int32_t                     hiddenQuantizedOne,
+                                    std::uint8_t*                    out) {
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
+    __m256i acc2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 16));
+    __m256i acc3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 24));
 
     for (std::size_t i = 0; i < inputDim; ++i)
     {
@@ -206,7 +206,7 @@ void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
             continue;
 
         const __m256i vin16 = _mm256_set1_epi16(static_cast<std::int16_t>(in));
-        const auto*   row   = weight.data() + i * 32;
+        const auto*   row   = weight + i * 32;
 
         const __m128i w8a    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(row));
         const __m256i w16a   = _mm256_cvtepi8_epi16(w8a);
@@ -228,7 +228,181 @@ void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
     _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 24), acc3);
     quantize_clip_i32_to_u8_avx2_exact(acc, 32, weightScaleHidden, hiddenQuantizedOne, out);
 }
+
+template<std::size_t InputDim>
+void dense_layer_clip_q_avx2_packed_out16(const std::uint8_t* input,
+                                           const std::int8_t*  weightPacked4,
+                                           const std::int32_t* bias,
+                                           std::int32_t        weightScaleHidden,
+                                           std::int32_t        hiddenQuantizedOne,
+                                           std::uint8_t*       out) {
+    static_assert(InputDim % 4 == 0, "InputDim must be divisible by 4");
+    constexpr std::size_t chunkCount = InputDim / 4;
+
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (std::size_t c = 0; c < chunkCount; ++c)
+    {
+        std::uint32_t in4 = 0;
+        std::memcpy(&in4, input + c * 4, sizeof(in4));
+        const __m256i inVec = _mm256_set1_epi32(static_cast<std::int32_t>(in4));
+        const auto*   wChunk = weightPacked4 + c * (16 * 4);
+
+        const __m256i w0 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk));
+        const __m256i w1 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
+
+        const __m256i pair0 = _mm256_maddubs_epi16(inVec, w0);
+        const __m256i pair1 = _mm256_maddubs_epi16(inVec, w1);
+        acc0                = _mm256_add_epi32(acc0, _mm256_madd_epi16(pair0, ones16));
+        acc1                = _mm256_add_epi32(acc1, _mm256_madd_epi16(pair1, ones16));
+    }
+
+    alignas(32) std::int32_t acc[16];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc), acc0);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
+    quantize_clip_i32_to_u8_avx2_exact(acc, 16, weightScaleHidden, hiddenQuantizedOne, out);
+}
+
+template<std::size_t InputDim>
+void dense_layer_clip_q_avx2_packed_out32(const std::uint8_t* input,
+                                           const std::int8_t*  weightPacked4,
+                                           const std::int32_t* bias,
+                                           std::int32_t        weightScaleHidden,
+                                           std::int32_t        hiddenQuantizedOne,
+                                           std::uint8_t*       out) {
+    static_assert(InputDim % 4 == 0, "InputDim must be divisible by 4");
+    constexpr std::size_t chunkCount = InputDim / 4;
+
+    __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
+    __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
+    __m256i acc2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 16));
+    __m256i acc3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 24));
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (std::size_t c = 0; c < chunkCount; ++c)
+    {
+        std::uint32_t in4 = 0;
+        std::memcpy(&in4, input + c * 4, sizeof(in4));
+        const __m256i inVec = _mm256_set1_epi32(static_cast<std::int32_t>(in4));
+        const auto*   wChunk = weightPacked4 + c * (32 * 4);
+
+        const __m256i w0 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk));
+        const __m256i w1 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
+        const __m256i w2 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 64));
+        const __m256i w3 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 96));
+
+        const __m256i pair0 = _mm256_maddubs_epi16(inVec, w0);
+        const __m256i pair1 = _mm256_maddubs_epi16(inVec, w1);
+        const __m256i pair2 = _mm256_maddubs_epi16(inVec, w2);
+        const __m256i pair3 = _mm256_maddubs_epi16(inVec, w3);
+        acc0                = _mm256_add_epi32(acc0, _mm256_madd_epi16(pair0, ones16));
+        acc1                = _mm256_add_epi32(acc1, _mm256_madd_epi16(pair1, ones16));
+        acc2                = _mm256_add_epi32(acc2, _mm256_madd_epi16(pair2, ones16));
+        acc3                = _mm256_add_epi32(acc3, _mm256_madd_epi16(pair3, ones16));
+    }
+
+    alignas(32) std::int32_t acc[32];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc), acc0);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 8), acc1);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 16), acc2);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(acc + 24), acc3);
+    quantize_clip_i32_to_u8_avx2_exact(acc, 32, weightScaleHidden, hiddenQuantizedOne, out);
+}
 #endif
+
+template<std::size_t InputDim, std::size_t OutputDim>
+void dense_layer_clip_q_scalar_fixed(const std::uint8_t* input,
+                                     const std::int8_t*  weight,
+                                     const std::int32_t* bias,
+                                     std::int32_t        weightScaleHidden,
+                                     std::int32_t        hiddenQuantizedOne,
+                                     std::uint8_t*       out) {
+    std::array<std::int64_t, OutputDim> acc{};
+    for (std::size_t j = 0; j < OutputDim; ++j)
+        acc[j] = bias[j];
+
+    for (std::size_t i = 0; i < InputDim; ++i)
+    {
+        const std::uint8_t in = input[i];
+        if (!in)
+            continue;
+
+        const auto* row = weight + i * OutputDim;
+        for (std::size_t j = 0; j < OutputDim; ++j)
+            acc[j] += std::int64_t(in) * std::int64_t(row[j]);
+    }
+
+    for (std::size_t j = 0; j < OutputDim; ++j)
+        out[j] =
+          clip_to_hidden_q(round_div_symmetric_i64(acc[j], weightScaleHidden), hiddenQuantizedOne);
+}
+
+template<std::size_t InputDim>
+void dense_layer_clip_q_fixed_out16(const std::uint8_t* input,
+                                    const std::int8_t*  weight,
+                                    const std::int8_t*  weightPacked4,
+                                    const std::int32_t* bias,
+                                    std::int32_t        weightScaleHidden,
+                                    std::int32_t        hiddenQuantizedOne,
+                                    std::uint8_t*       out) {
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+    if (weightPacked4)
+        dense_layer_clip_q_avx2_packed_out16<InputDim>(input, weightPacked4, bias, weightScaleHidden,
+                                                       hiddenQuantizedOne, out);
+    else
+        dense_layer_clip_q_avx2_out16(input, InputDim, weight, bias, weightScaleHidden,
+                                      hiddenQuantizedOne, out);
+#else
+    dense_layer_clip_q_scalar_fixed<InputDim, 16>(input, weight, bias, weightScaleHidden, hiddenQuantizedOne, out);
+#endif
+}
+
+template<std::size_t InputDim>
+void dense_layer_clip_q_fixed_out32(const std::uint8_t* input,
+                                    const std::int8_t*  weight,
+                                    const std::int8_t*  weightPacked4,
+                                    const std::int32_t* bias,
+                                    std::int32_t        weightScaleHidden,
+                                    std::int32_t        hiddenQuantizedOne,
+                                    std::uint8_t*       out) {
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+    if (weightPacked4)
+        dense_layer_clip_q_avx2_packed_out32<InputDim>(input, weightPacked4, bias, weightScaleHidden,
+                                                       hiddenQuantizedOne, out);
+    else
+        dense_layer_clip_q_avx2_out32(input, InputDim, weight, bias, weightScaleHidden,
+                                      hiddenQuantizedOne, out);
+#else
+    dense_layer_clip_q_scalar_fixed<InputDim, 32>(input, weight, bias, weightScaleHidden, hiddenQuantizedOne, out);
+#endif
+}
+
+std::int64_t dense_output_acc_q_fixed_32(const std::uint8_t* input,
+                                         const std::int8_t*  weight,
+                                         std::int32_t        bias,
+                                         std::int32_t        hiddenQuantizedOne) {
+    std::int64_t acc = bias;
+#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+    if (hiddenQuantizedOne <= 127)
+    {
+        const __m256i inVec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input));
+        const __m256i wVec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weight));
+        const __m256i pairSums16 = _mm256_maddubs_epi16(inVec, wVec);
+        const __m256i laneSums32 = _mm256_madd_epi16(pairSums16, _mm256_set1_epi16(1));
+
+        alignas(32) std::int32_t partial[8];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(partial), laneSums32);
+        for (int i = 0; i < 8; ++i)
+            acc += partial[i];
+        return acc;
+    }
+#endif
+    for (std::size_t i = 0; i < 32; ++i)
+        acc += std::int64_t(input[i]) * std::int64_t(weight[i]);
+    return acc;
+}
 
 bool parse_positive_int_after_colon(std::string_view s, std::size_t colonPos, int& out) {
     std::size_t i = colonPos + 1;
@@ -700,11 +874,68 @@ bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT>& out) {
     return true;
 }
 
+template<typename IntT, std::size_t N>
+bool read_raw_array(ByteReader& rd, std::size_t count, std::array<IntT, N>& out) {
+    if (count != N)
+        return false;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if constexpr (std::is_same_v<IntT, std::int8_t>)
+        {
+            std::int8_t v{};
+            if (!rd.read_i8(v))
+                return false;
+            out[i] = v;
+        }
+        else if constexpr (std::is_same_v<IntT, std::int16_t>)
+        {
+            std::int16_t v{};
+            if (!rd.read_i16(v))
+                return false;
+            out[i] = v;
+        }
+        else
+        {
+            static_assert(std::is_same_v<IntT, std::int32_t>);
+            std::int32_t v{};
+            if (!rd.read_i32(v))
+                return false;
+            out[i] = v;
+        }
+    }
+    return true;
+}
+
 bool read_raw_scalar_i32(ByteReader& rd, std::int32_t& out) { return rd.read_i32(out); }
 
+template<std::size_t InDim, std::size_t OutDim>
+void prepack_weight_rows_to_chunk4(const std::array<std::int8_t, InDim * OutDim>& srcRowMajor,
+                                   std::array<std::int8_t, (InDim / 4) * OutDim * 4>& outPacked4) {
+    static_assert(InDim % 4 == 0, "InDim must be divisible by 4");
+    constexpr std::size_t chunkCount = InDim / 4;
+    for (std::size_t c = 0; c < chunkCount; ++c)
+        for (std::size_t o = 0; o < OutDim; ++o)
+            for (std::size_t lane = 0; lane < 4; ++lane)
+            {
+                const std::size_t srcIdx = (c * 4 + lane) * OutDim + o;
+                const std::size_t dstIdx = (c * OutDim + o) * 4 + lane;
+                outPacked4[dstIdx] = srcRowMajor[srcIdx];
+            }
+}
+
+template<std::size_t InDim, std::size_t H2Dim, std::size_t H3Dim>
 struct BucketLayers {
-    std::vector<std::int8_t>  h2Weight, h3Weight;
-    std::vector<std::int32_t> h2Bias, h3Bias;
+    static_assert(InDim % 4 == 0, "InDim must be divisible by 4 for packed-4 layout");
+    static_assert(H2Dim % 4 == 0, "H2Dim must be divisible by 4 for packed-4 layout");
+
+    alignas(32) std::array<std::int8_t, InDim * H2Dim> h2Weight{};
+    alignas(32) std::array<std::int32_t, H2Dim>        h2Bias{};
+    alignas(32) std::array<std::int8_t, H2Dim * H3Dim> h3Weight{};
+    alignas(32) std::array<std::int32_t, H3Dim>        h3Bias{};
+    // Packed by 4-input chunks to match AVX2 dpbusd-style accumulation.
+    // dst[(chunk * OutDim + out) * 4 + lane] = src[(chunk * 4 + lane) * OutDim + out]
+    alignas(32) std::array<std::int8_t, (InDim / 4) * H2Dim * 4> h2WeightPacked4{};
+    alignas(32) std::array<std::int8_t, (H2Dim / 4) * H3Dim * 4> h3WeightPacked4{};
 };
 
 struct EncodedFen {
@@ -786,12 +1017,14 @@ struct Network::Impl {
 
     std::vector<std::int16_t> hidden1Weight;
     std::vector<std::int16_t> hidden1Bias;
-    std::array<BucketLayers, kExpectedBucketCount> psqtBuckets{};
-    std::array<BucketLayers, kExpectedBucketCount> positionalBuckets{};
-    std::vector<std::int8_t> psqtOutputWeight;
-    std::int32_t             psqtOutputBias = 0;
-    std::vector<std::int8_t> positionalOutputWeight;
-    std::int32_t             positionalOutputBias = 0;
+    std::array<BucketLayers<kExpectedH1Psqt, kExpectedPsqtH2, kExpectedPsqtH3>, kExpectedBucketCount>
+      psqtBuckets{};
+    std::array<BucketLayers<kExpectedH1Pos, kExpectedPosH2, kExpectedPosH3>, kExpectedBucketCount>
+      positionalBuckets{};
+    alignas(32) std::array<std::int8_t, kExpectedPsqtH3> psqtOutputWeight{};
+    std::int32_t                                          psqtOutputBias = 0;
+    alignas(32) std::array<std::int8_t, kExpectedPosH3> positionalOutputWeight{};
+    std::int32_t                                         positionalOutputBias = 0;
 };
 
 Network::Network(const Network& other) :
@@ -1142,31 +1375,35 @@ bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network:
 
     for (auto& b : impl.psqtBuckets)
     {
-        if (!read_raw_array<std::int8_t>(rd, std::size_t(kExpectedH1Psqt) * kExpectedPsqtH2, b.h2Weight)
-            || !read_raw_array<std::int32_t>(rd, kExpectedPsqtH2, b.h2Bias)
-            || !read_raw_array<std::int8_t>(rd, std::size_t(kExpectedPsqtH2) * kExpectedPsqtH3, b.h3Weight)
-            || !read_raw_array<std::int32_t>(rd, kExpectedPsqtH3, b.h3Bias))
+        if (!read_raw_array<std::int8_t>(rd, b.h2Weight.size(), b.h2Weight)
+            || !read_raw_array<std::int32_t>(rd, b.h2Bias.size(), b.h2Bias)
+            || !read_raw_array<std::int8_t>(rd, b.h3Weight.size(), b.h3Weight)
+            || !read_raw_array<std::int32_t>(rd, b.h3Bias.size(), b.h3Bias))
         {
             err = "Failed reading PSQT bucket tensors";
             return false;
         }
+        prepack_weight_rows_to_chunk4<kExpectedH1Psqt, kExpectedPsqtH2>(b.h2Weight, b.h2WeightPacked4);
+        prepack_weight_rows_to_chunk4<kExpectedPsqtH2, kExpectedPsqtH3>(b.h3Weight, b.h3WeightPacked4);
     }
 
     for (auto& b : impl.positionalBuckets)
     {
-        if (!read_raw_array<std::int8_t>(rd, std::size_t(kExpectedH1Pos) * kExpectedPosH2, b.h2Weight)
-            || !read_raw_array<std::int32_t>(rd, kExpectedPosH2, b.h2Bias)
-            || !read_raw_array<std::int8_t>(rd, std::size_t(kExpectedPosH2) * kExpectedPosH3, b.h3Weight)
-            || !read_raw_array<std::int32_t>(rd, kExpectedPosH3, b.h3Bias))
+        if (!read_raw_array<std::int8_t>(rd, b.h2Weight.size(), b.h2Weight)
+            || !read_raw_array<std::int32_t>(rd, b.h2Bias.size(), b.h2Bias)
+            || !read_raw_array<std::int8_t>(rd, b.h3Weight.size(), b.h3Weight)
+            || !read_raw_array<std::int32_t>(rd, b.h3Bias.size(), b.h3Bias))
         {
             err = "Failed reading positional bucket tensors";
             return false;
         }
+        prepack_weight_rows_to_chunk4<kExpectedH1Pos, kExpectedPosH2>(b.h2Weight, b.h2WeightPacked4);
+        prepack_weight_rows_to_chunk4<kExpectedPosH2, kExpectedPosH3>(b.h3Weight, b.h3WeightPacked4);
     }
 
-    if (!read_raw_array<std::int8_t>(rd, kExpectedPsqtH3, impl.psqtOutputWeight)
+    if (!read_raw_array<std::int8_t>(rd, impl.psqtOutputWeight.size(), impl.psqtOutputWeight)
         || !read_raw_scalar_i32(rd, impl.psqtOutputBias)
-        || !read_raw_array<std::int8_t>(rd, kExpectedPosH3, impl.positionalOutputWeight)
+        || !read_raw_array<std::int8_t>(rd, impl.positionalOutputWeight.size(), impl.positionalOutputWeight)
         || !read_raw_scalar_i32(rd, impl.positionalOutputBias))
     {
         err = "Failed reading output tensors";
@@ -1422,75 +1659,6 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     const auto& psqtB = impl.psqtBuckets[std::size_t(state.bucket16)];
     const auto& posB  = impl.positionalBuckets[std::size_t(state.bucket16)];
 
-    auto dense_layer_clip_q = [weightScaleHidden, hiddenQuantizedOne](const std::uint8_t* input,
-                                                                       std::size_t inputDim,
-                                                                       std::size_t outputDim,
-                                                                       const std::vector<std::int8_t>& weight,
-                                                                       const std::vector<std::int32_t>& bias,
-                                                                       std::uint8_t* out) {
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
-        if (outputDim == 16 && bias.size() >= 16 && weight.size() >= inputDim * 16)
-        {
-            dense_layer_clip_q_avx2_out16(input, inputDim, weight, bias, weightScaleHidden,
-                                          hiddenQuantizedOne, out);
-            return;
-        }
-
-        if (outputDim == 32 && bias.size() >= 32 && weight.size() >= inputDim * 32)
-        {
-            dense_layer_clip_q_avx2_out32(input, inputDim, weight, bias, weightScaleHidden,
-                                          hiddenQuantizedOne, out);
-            return;
-        }
-#endif
-        // Row-major-friendly accumulation: walk each input row once and update all outputs.
-        std::array<std::int64_t, kExpectedPosH3> acc{};
-        for (std::size_t j = 0; j < outputDim; ++j)
-            acc[j] = bias[j];
-
-        for (std::size_t i = 0; i < inputDim; ++i)
-        {
-            const std::uint8_t in = input[i];
-            if (!in)
-                continue;
-
-            const auto* row = weight.data() + i * outputDim;
-            for (std::size_t j = 0; j < outputDim; ++j)
-                acc[j] += std::int64_t(in) * std::int64_t(row[j]);
-        }
-
-        for (std::size_t j = 0; j < outputDim; ++j)
-            out[j] =
-              clip_to_hidden_q(round_div_symmetric_i64(acc[j], weightScaleHidden), hiddenQuantizedOne);
-    };
-
-    auto dense_output_acc_q = [hiddenQuantizedOne](const std::uint8_t* input,
-                                                   std::size_t inputDim,
-                                                   const std::vector<std::int8_t>& weight,
-                                                   std::int32_t bias) {
-        std::int64_t acc = bias;
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
-        if (hiddenQuantizedOne <= 127 && inputDim == 32 && weight.size() >= 32)
-        {
-            const __m256i inVec =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input));
-            const __m256i wVec =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weight.data()));
-            const __m256i pairSums16 = _mm256_maddubs_epi16(inVec, wVec);
-            const __m256i laneSums32 = _mm256_madd_epi16(pairSums16, _mm256_set1_epi16(1));
-
-            std::int32_t partial[8];
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(partial), laneSums32);
-            for (int i = 0; i < 8; ++i)
-                acc += partial[i];
-            return acc;
-        }
-#endif
-        for (std::size_t i = 0; i < inputDim; ++i)
-            acc += std::int64_t(input[i]) * std::int64_t(weight[i]);
-        return acc;
-    };
-
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     std::int64_t    psqtOutAccQ = 0;
     std::int64_t    posOutAccQ  = 0;
@@ -1499,17 +1667,24 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
         ++metrics->postH1ForwardCalls;
     {
         ScopedRuntimeMetricTimer postH1Timer(metrics ? &metrics->postH1ForwardNs : nullptr);
-        dense_layer_clip_q(state.h1Clip.data(), kExpectedH1Psqt, kExpectedPsqtH2, psqtB.h2Weight, psqtB.h2Bias,
-                           psqtH2.data());
-        dense_layer_clip_q(psqtH2.data(), kExpectedPsqtH2, kExpectedPsqtH3, psqtB.h3Weight, psqtB.h3Bias,
-                           psqtH3.data());
-        dense_layer_clip_q(state.h1Clip.data() + kExpectedH1Psqt, kExpectedH1Pos, kExpectedPosH2, posB.h2Weight,
-                           posB.h2Bias, posH2.data());
-        dense_layer_clip_q(posH2.data(), kExpectedPosH2, kExpectedPosH3, posB.h3Weight, posB.h3Bias, posH3.data());
+        dense_layer_clip_q_fixed_out16<kExpectedH1Psqt>(state.h1Clip.data(), psqtB.h2Weight.data(),
+                                                        psqtB.h2WeightPacked4.data(), psqtB.h2Bias.data(),
+                                                        weightScaleHidden, hiddenQuantizedOne, psqtH2.data());
+        dense_layer_clip_q_fixed_out32<kExpectedPsqtH2>(psqtH2.data(), psqtB.h3Weight.data(),
+                                                        psqtB.h3WeightPacked4.data(), psqtB.h3Bias.data(),
+                                                        weightScaleHidden, hiddenQuantizedOne, psqtH3.data());
+        dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(state.h1Clip.data() + kExpectedH1Psqt,
+                                                       posB.h2Weight.data(), posB.h2WeightPacked4.data(),
+                                                       posB.h2Bias.data(), weightScaleHidden,
+                                                       hiddenQuantizedOne, posH2.data());
+        dense_layer_clip_q_fixed_out32<kExpectedPosH2>(posH2.data(), posB.h3Weight.data(),
+                                                       posB.h3WeightPacked4.data(), posB.h3Bias.data(),
+                                                       weightScaleHidden, hiddenQuantizedOne, posH3.data());
 
-        psqtOutAccQ = dense_output_acc_q(psqtH3.data(), kExpectedPsqtH3, impl.psqtOutputWeight, impl.psqtOutputBias);
-        posOutAccQ =
-          dense_output_acc_q(posH3.data(), kExpectedPosH3, impl.positionalOutputWeight, impl.positionalOutputBias);
+        psqtOutAccQ = dense_output_acc_q_fixed_32(psqtH3.data(), impl.psqtOutputWeight.data(),
+                                                  impl.psqtOutputBias, hiddenQuantizedOne);
+        posOutAccQ = dense_output_acc_q_fixed_32(posH3.data(), impl.positionalOutputWeight.data(),
+                                                 impl.positionalOutputBias, hiddenQuantizedOne);
     }
 
     if (metrics)
