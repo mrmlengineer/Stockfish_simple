@@ -29,9 +29,8 @@
 #include <utility>
 #include <vector>
 
-#include "custom_nnue/custom_nnue_network.h"
 #include "history.h"
-#include "nnue/network.h"
+#include "nnuex/network.h"
 #include "numa.h"
 #include "position.h"
 #include "search.h"
@@ -88,10 +87,7 @@ class Engine {
 
     void verify_networks() const;
     void load_networks();
-    void load_custom_network(const std::string& file);
-    void load_big_network(const std::string& file);
-    void load_small_network(const std::string& file);
-    void save_network(const std::pair<std::optional<std::string>, std::string> files[2]);
+    void load_network(const std::string& file);
 
     // utility functions
 
@@ -122,8 +118,7 @@ class Engine {
     OptionsMap                                         options;
     ThreadPool                                         threads;
     TranspositionTable                                 tt;
-    LazyNumaReplicatedSystemWide<Eval::NNUE::Networks> networks;
-    LazyNumaReplicated<CustomNNUE::Network>            customNetworks;
+    LazyNumaReplicated<Eval::NNUEX::Network> nnuex;
 
     Search::SearchManager::UpdateContext  updateContext;
     std::function<void(std::string_view)> onVerifyNetworks;

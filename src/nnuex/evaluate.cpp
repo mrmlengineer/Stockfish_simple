@@ -1,8 +1,8 @@
 /*
-  Custom NNUEX outer evaluation integration (full mode).
+  NNUEX outer evaluation integration.
 */
 
-#include "custom_nnue_eval.h"
+#include "evaluate.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,9 +11,9 @@
 #include "../evaluate.h"
 #include "../position.h"
 #include "../uci.h"
-#include "custom_nnue_network.h"
+#include "network.h"
 
-namespace Stockfish::CustomNNUE {
+namespace Stockfish::Eval::NNUEX {
 
 namespace {
 
@@ -64,7 +64,7 @@ std::string trace(Position& pos, const Network& net) {
     auto out = net.evaluate(pos);
     if (!out.has_value())
     {
-        ss << "Custom NNUEX: not loaded\n";
+        ss << "NNUEX: not loaded\n";
         ss << "Fallback simple_eval: " << Eval::simple_eval(pos);
         return ss.str();
     }
@@ -79,7 +79,7 @@ std::string trace(Position& pos, const Network& net) {
     Value nnueW  = pos.side_to_move() == WHITE ? nnue : -nnue;
     Value finalW = pos.side_to_move() == WHITE ? final : -final;
 
-    ss << "Custom NNUEX trace\n";
+    ss << "NNUEX trace\n";
     ss << "  piece_count: " << out->pieceCount << "\n";
     ss << "  bucket8/stm/bucket16: " << out->bucket8 << "/" << out->stmBlack << "/" << out->bucket16 << "\n";
     ss << "  psqt (cp, stm): " << int(psqt) << "\n";
@@ -92,4 +92,4 @@ std::string trace(Position& pos, const Network& net) {
     return ss.str();
 }
 
-}  // namespace Stockfish::CustomNNUE
+}  // namespace Stockfish::Eval::NNUEX

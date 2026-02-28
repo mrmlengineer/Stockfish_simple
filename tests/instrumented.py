@@ -1,7 +1,6 @@
 import argparse
 import re
 import sys
-import subprocess
 import pathlib
 import os
 
@@ -17,6 +16,9 @@ from testing import (
 
 PATH = pathlib.Path(__file__).parent.resolve()
 CWD = os.getcwd()
+DEFAULT_NNUEX_FILE = (
+    PATH.parent.parent / "export" / "quantized_weights_qat_only3_split_h1_dual_heads_stm16buckets.nnuex"
+).resolve()
 
 
 def get_prefix():
@@ -163,16 +165,7 @@ class TestCLI(metaclass=OrderedClassMembers):
         self.stockfish = Stockfish("uci".split(" "), True)
         assert self.stockfish.process.returncode == 0
 
-    def test_export_net_verify_nnue(self):
-        current_path = os.path.abspath(os.getcwd())
-        self.stockfish = Stockfish(
-            f"export_net {os.path.join(current_path, 'verify.nnue')}".split(" "), True
-        )
-        assert self.stockfish.process.returncode == 0
-
-    # verify the generated net equals the base net
-
-    def test_network_equals_base(self):
+    def test_uci_exposes_nnuex_options(self):
         self.stockfish = Stockfish(
             ["uci"],
             True,
@@ -180,24 +173,10 @@ class TestCLI(metaclass=OrderedClassMembers):
 
         output = self.stockfish.process.stdout
 
-        # find line
-        for line in output.split("\n"):
-            if "option name EvalFile type string default" in line:
-                network = line.split(" ")[-1]
-                break
-
-        # find network file in src dir
-        network = os.path.join(PATH.parent.resolve(), "src", network)
-
-        if not os.path.exists(network):
-            print(
-                f"Network file {network} not found, please download the network file over the make command."
-            )
-            assert False
-
-        diff = subprocess.run(["diff", network, f"verify.nnue"])
-
-        assert diff.returncode == 0
+        assert "option name EvalFile type string default" in output
+        assert "option name NNUEXMode type combo default full incremental" in output
+        assert "option name NNUEXParityCheck type check default false" in output
+        assert "option name NNUEXMetrics type check default false" in output
 
 
 class TestInteractive(metaclass=OrderedClassMembers):
@@ -386,16 +365,33 @@ class TestInteractive(metaclass=OrderedClassMembers):
         self.stockfish.expect("* score mate -1 * pv e3e2 f7f5")
         self.stockfish.starts_with("bestmove e3e2")
 
-    def test_verify_nnue_network(self):
-        current_path = os.path.abspath(os.getcwd())
-        Stockfish(
-            f"export_net {os.path.join(current_path, 'verify.nnue')}".split(" "), True
-        )
-
-        self.stockfish.send_command("setoption name EvalFile value verify.nnue")
+    def test_evalfile_loads_nnuex_network(self):
+        self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
         self.stockfish.send_command("position startpos")
         self.stockfish.send_command("go depth 5")
         self.stockfish.starts_with("bestmove")
+
+    def test_nnuex_mode_incremental(self):
+        self.stockfish.send_command("setoption name NNUEXMode value incremental")
+        self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
+        self.stockfish.send_command("position startpos")
+        self.stockfish.send_command("go depth 5")
+        self.stockfish.starts_with("bestmove")
+        self.stockfish.send_command("setoption name NNUEXMode value full")
+
+    def test_nnuex_parity_and_metrics(self):
+        self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
+        self.stockfish.send_command("setoption name NNUEXMode value incremental")
+        self.stockfish.send_command("setoption name NNUEXParityCheck value true")
+        self.stockfish.send_command("setoption name NNUEXMetrics value true")
+        self.stockfish.send_command("position startpos")
+        self.stockfish.send_command("go depth 3")
+        self.stockfish.contains("info string NNUEX incremental parity summary")
+        self.stockfish.contains("info string NNUEX metrics summary")
+        self.stockfish.starts_with("bestmove")
+        self.stockfish.send_command("setoption name NNUEXParityCheck value false")
+        self.stockfish.send_command("setoption name NNUEXMetrics value false")
+        self.stockfish.send_command("setoption name NNUEXMode value full")
 
     def test_multipv_setting(self):
         self.stockfish.send_command("setoption name MultiPV value 4")

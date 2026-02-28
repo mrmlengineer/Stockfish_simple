@@ -1,9 +1,9 @@
 /*
-  Custom dual-head NNUEX runtime (full-recompute reference path).
+  NNUEX runtime (full-recompute reference path).
 */
 
-#ifndef CUSTOM_NNUE_NETWORK_H_INCLUDED
-#define CUSTOM_NNUE_NETWORK_H_INCLUDED
+#ifndef NNUEX_NETWORK_H_INCLUDED
+#define NNUEX_NETWORK_H_INCLUDED
 
 #include <array>
 #include <cstdint>
@@ -19,7 +19,7 @@ namespace Stockfish {
 class Position;
 }
 
-namespace Stockfish::CustomNNUE {
+namespace Stockfish::Eval::NNUEX {
 
 inline constexpr const char* EvalFileDefaultName =
   "quantized_weights_qat_only3_split_h1_dual_heads_stm16buckets.nnuex";
@@ -47,8 +47,8 @@ struct IncrementalState {
     // Integer runtime domains (matching Python integer-sim semantics):
     // - h1Pre: q255 pre-activation accumulator
     // - h1Clip: q127 clipped activation
-    std::array<std::int32_t, 512> h1Pre{};
-    std::array<std::uint8_t, 512> h1Clip{};
+    alignas(64) std::array<std::int32_t, 512> h1Pre{};
+    alignas(64) std::array<std::uint8_t, 512> h1Clip{};
 };
 
 struct RuntimeMetrics {
@@ -115,7 +115,7 @@ class Network {
     Impl*       impl_ = nullptr;
 
    public:
-    // Custom copy/move to keep pimpl owned without exposing headers in shm/numa templates.
+    // Keep pimpl ownership local without exposing implementation details in numa templates.
     Network(const Network&);
     Network(Network&&) noexcept;
     Network& operator=(const Network&);
@@ -123,6 +123,6 @@ class Network {
     ~Network();
 };
 
-}  // namespace Stockfish::CustomNNUE
+}  // namespace Stockfish::Eval::NNUEX
 
-#endif  // CUSTOM_NNUE_NETWORK_H_INCLUDED
+#endif  // NNUEX_NETWORK_H_INCLUDED

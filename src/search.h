@@ -32,11 +32,10 @@
 #include <string_view>
 #include <vector>
 
-#include "custom_nnue/custom_nnue_network.h"
 #include "history.h"
 #include "misc.h"
-#include "nnue/network.h"
-#include "nnue/nnue_accumulator.h"
+#include "nnuex/diff_stack.h"
+#include "nnuex/network.h"
 #include "numa.h"
 #include "position.h"
 #include "score.h"
@@ -135,25 +134,22 @@ struct LimitsType {
 // The UCI stores the uci options, thread pool, and transposition table.
 // This struct is used to easily forward data to the Search::Worker class.
 struct SharedState {
-    SharedState(const OptionsMap&                                         optionsMap,
-                ThreadPool&                                               threadPool,
-                TranspositionTable&                                       transpositionTable,
-                std::map<NumaIndex, SharedHistories>&                     sharedHists,
-                const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& nets,
-                const LazyNumaReplicated<CustomNNUE::Network>&            customNets) :
+    SharedState(const OptionsMap&                              optionsMap,
+                ThreadPool&                                    threadPool,
+                TranspositionTable&                            transpositionTable,
+                std::map<NumaIndex, SharedHistories>&          sharedHists,
+                const LazyNumaReplicated<Eval::NNUEX::Network>& nnuexNet) :
         options(optionsMap),
         threads(threadPool),
         tt(transpositionTable),
         sharedHistories(sharedHists),
-        networks(nets),
-        customNetworks(customNets) {}
+        nnuex(nnuexNet) {}
 
-    const OptionsMap&                                         options;
-    ThreadPool&                                               threads;
-    TranspositionTable&                                       tt;
-    std::map<NumaIndex, SharedHistories>&                     sharedHistories;
-    const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& networks;
-    const LazyNumaReplicated<CustomNNUE::Network>&            customNetworks;
+    const OptionsMap&                               options;
+    ThreadPool&                                     threads;
+    TranspositionTable&                             tt;
+    std::map<NumaIndex, SharedHistories>&           sharedHistories;
+    const LazyNumaReplicated<Eval::NNUEX::Network>& nnuex;
 };
 
 class Worker;
@@ -266,7 +262,7 @@ class NullSearchManager: public ISearchManager {
     void check_time(Search::Worker&) override {}
 };
 
-struct CustomNNUEMetrics {
+struct NNUEXMetrics {
     std::uint64_t evalCalls                        = 0;
     std::uint64_t evalIncrementalRequested         = 0;
     std::uint64_t evalIncrementalStateUsed         = 0;
@@ -297,7 +293,7 @@ struct CustomNNUEMetrics {
     std::uint64_t advanceMoveNs                    = 0;
     std::uint64_t advanceNullNs                    = 0;
     std::uint64_t parityDirectEvalNs               = 0;
-    CustomNNUE::RuntimeMetrics runtime{};
+    Eval::NNUEX::RuntimeMetrics runtime{};
 };
 
 // Search::Worker is the class that does the actual search.
@@ -344,13 +340,13 @@ class Worker {
     void do_null_move(Position& pos, StateInfo& st, Stack* const ss);
     void undo_move(Position& pos, const Move move);
     void undo_null_move(Position& pos);
-    void refresh_custom_option_cache();
-    bool use_custom_incremental_mode() const;
-    bool use_custom_metrics() const;
-    void reset_custom_incremental_stack();
-    void push_custom_incremental_move(const Position& posAfterMove, Move move, const DirtyPiece& dirtyPiece);
-    void push_custom_incremental_null(const Position& posAfterNull);
-    void pop_custom_incremental();
+    void refresh_nnuex_option_cache();
+    bool use_nnuex_incremental_mode() const;
+    bool use_nnuex_metrics() const;
+    void reset_nnuex_incremental_stack();
+    void push_nnuex_incremental_move(const Position& posAfterMove, Move move, const DirtyPiece& dirtyPiece);
+    void push_nnuex_incremental_null(const Position& posAfterNull);
+    void pop_nnuex_incremental();
 
     // This is the main search function, for both PV and non-PV nodes
     template<NodeType nodeType>
@@ -398,25 +394,23 @@ class Worker {
 
     Tablebases::Config tbConfig;
 
-    const OptionsMap&                                         options;
-    ThreadPool&                                               threads;
-    TranspositionTable&                                       tt;
-    const LazyNumaReplicatedSystemWide<Eval::NNUE::Networks>& networks;
-    const LazyNumaReplicated<CustomNNUE::Network>&            customNetworks;
+    const OptionsMap&                               options;
+    ThreadPool&                                     threads;
+    TranspositionTable&                             tt;
+    const LazyNumaReplicated<Eval::NNUEX::Network>& nnuex;
 
-    // Used by NNUE
-    Eval::NNUE::AccumulatorStack  accumulatorStack;
-    Eval::NNUE::AccumulatorCaches refreshTable;
-    static constexpr std::size_t  customAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
-    std::array<CustomNNUE::IncrementalState, customAccumulatorCapacity> customAccumulatorStack{};
-    std::size_t                                                   customAccumulatorSize = 0;
-    std::uint64_t                                                 customParityChecks     = 0;
-    std::uint64_t                                                 customParityMismatches = 0;
-    std::uint64_t                                                 customParityLogs       = 0;
-    bool                                                          customIncrementalEnabledCached = false;
-    bool                                                          customMetricsEnabledCached     = false;
-    bool                                                          customParityEnabledCached      = false;
-    CustomNNUEMetrics                                             customMetrics{};
+    // Used by NNUEX
+    Eval::NNUEX::DiffStack<>                    nnuexDiffs;
+    static constexpr std::size_t                nnuexAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
+    std::array<Eval::NNUEX::IncrementalState, nnuexAccumulatorCapacity> nnuexAccumulatorStack{};
+    std::size_t                                 nnuexAccumulatorSize = 0;
+    std::uint64_t                               nnuexParityChecks     = 0;
+    std::uint64_t                               nnuexParityMismatches = 0;
+    std::uint64_t                               nnuexParityLogs       = 0;
+    bool                                        nnuexIncrementalEnabledCached = false;
+    bool                                        nnuexMetricsEnabledCached     = false;
+    bool                                        nnuexParityEnabledCached      = false;
+    NNUEXMetrics                                nnuexMetrics{};
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

@@ -1,8 +1,8 @@
 /*
-  Custom dual-head NNUEX runtime (full-recompute reference path).
+  NNUEX runtime (full-recompute reference path).
 */
 
-#include "custom_nnue_network.h"
+#include "network.h"
 
 #include <algorithm>
 #include <array>
@@ -23,15 +23,14 @@
 
 #if defined(USE_AVX2) && (defined(__AVX2__) || defined(_M_AVX2))
   #include <immintrin.h>
-  #define CUSTOM_NNUE_HAS_AVX2_INTRINSICS 1
+  #define NNUEX_HAS_AVX2_INTRINSICS 1
 #else
-  #define CUSTOM_NNUE_HAS_AVX2_INTRINSICS 0
+  #define NNUEX_HAS_AVX2_INTRINSICS 0
 #endif
 
-#include "../nnue/nnue_common.h"
 #include "../position.h"
 
-namespace Stockfish::CustomNNUE {
+namespace Stockfish::Eval::NNUEX {
 
 namespace {
 
@@ -111,7 +110,7 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
     return static_cast<std::uint8_t>(x);
 }
 
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
 void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
                                         std::size_t         count,
                                         std::int32_t        denom,
@@ -348,7 +347,7 @@ void dense_layer_clip_q_fixed_out16(const std::uint8_t* input,
                                     std::int32_t        weightScaleHidden,
                                     std::int32_t        hiddenQuantizedOne,
                                     std::uint8_t*       out) {
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
     if (weightPacked4)
         dense_layer_clip_q_avx2_packed_out16<InputDim>(input, weightPacked4, bias, weightScaleHidden,
                                                        hiddenQuantizedOne, out);
@@ -368,7 +367,7 @@ void dense_layer_clip_q_fixed_out32(const std::uint8_t* input,
                                     std::int32_t        weightScaleHidden,
                                     std::int32_t        hiddenQuantizedOne,
                                     std::uint8_t*       out) {
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
     if (weightPacked4)
         dense_layer_clip_q_avx2_packed_out32<InputDim>(input, weightPacked4, bias, weightScaleHidden,
                                                        hiddenQuantizedOne, out);
@@ -385,7 +384,7 @@ std::int64_t dense_output_acc_q_fixed_32(const std::uint8_t* input,
                                          std::int32_t        bias,
                                          std::int32_t        hiddenQuantizedOne) {
     std::int64_t acc = bias;
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
     if (hiddenQuantizedOne <= 127)
     {
         const __m256i inVec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input));
@@ -1310,7 +1309,7 @@ void Network::load(const std::string& rootDirectory, std::string evalfilePath) {
     std::string       err;
     if (!load_from_file(resolved, err))
     {
-        error_ = "Failed to load custom nnuex '" + requestedPath_ + "'";
+        error_ = "Failed to load nnuex '" + requestedPath_ + "'";
         if (resolved != requestedPath_)
             error_ += " (resolved to '" + resolved + "')";
         if (!err.empty())
@@ -1327,7 +1326,7 @@ void Network::verify(std::string evalfilePath,
         return;
 
     std::ostringstream ss;
-    ss << "Custom NNUEX ";
+    ss << "NNUEX ";
     if (!initialized_ || impl_ == nullptr)
     {
         ss << "not loaded";
@@ -1728,7 +1727,7 @@ void apply_h1_feature_delta(const Network::Impl& impl,
         h1Pre[j] += sign * std::int32_t(row[j]);
 }
 
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
 void refresh_h1_clip_avx2_exact(const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
                                 std::array<std::uint8_t, kExpectedH1Total>&       h1Clip,
                                 std::int32_t                                       ftQuantizedOne,
@@ -1778,7 +1777,7 @@ void refresh_h1_clip(const Network::Impl& impl,
 
     const std::int32_t ftQuantizedOne     = impl.ftQuantizedOne;
     const std::int32_t hiddenQuantizedOne = impl.hiddenQuantizedOne;
-#if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
+#if NNUEX_HAS_AVX2_INTRINSICS
     if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
     {
         refresh_h1_clip_avx2_exact(h1Pre, h1Clip, ftQuantizedOne, hiddenQuantizedOne);
@@ -2036,4 +2035,4 @@ std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const Enco
 
 }  // namespace
 
-}  // namespace Stockfish::CustomNNUE
+}  // namespace Stockfish::Eval::NNUEX

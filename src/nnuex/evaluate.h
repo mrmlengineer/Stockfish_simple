@@ -1,9 +1,9 @@
 /*
-  Custom NNUEX outer evaluation integration (full mode).
+  NNUEX outer evaluation integration.
 */
 
-#ifndef CUSTOM_NNUE_EVAL_H_INCLUDED
-#define CUSTOM_NNUE_EVAL_H_INCLUDED
+#ifndef NNUEX_EVALUATE_H_INCLUDED
+#define NNUEX_EVALUATE_H_INCLUDED
 
 #include <string>
 
@@ -13,7 +13,7 @@ namespace Stockfish {
 class Position;
 }
 
-namespace Stockfish::CustomNNUE {
+namespace Stockfish::Eval::NNUEX {
 
 class Network;
 struct IncrementalState;
@@ -26,6 +26,6 @@ Value       evaluate(const Network&         net,
                      bool                   incrementalRequested);
 std::string trace(Position& pos, const Network& net);
 
-}  // namespace Stockfish::CustomNNUE
+}  // namespace Stockfish::Eval::NNUEX
 
-#endif  // CUSTOM_NNUE_EVAL_H_INCLUDED
+#endif  // NNUEX_EVALUATE_H_INCLUDED

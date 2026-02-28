@@ -70,23 +70,17 @@ PGOBENCH = $(RUN_PREFIX) ./$(EXE) bench
 SRCS = benchmark.cpp bitboard.cpp evaluate.cpp main.cpp \
 	misc.cpp movegen.cpp movepick.cpp position.cpp \
 	search.cpp thread.cpp timeman.cpp tt.cpp uci.cpp ucioption.cpp tune.cpp syzygy/tbprobe.cpp \
-	nnue/nnue_accumulator.cpp nnue/nnue_misc.cpp nnue/network.cpp \
-	nnue/features/half_ka_v2_hm.cpp nnue/features/full_threats.cpp \
-	custom_nnue/custom_nnue_network.cpp custom_nnue/custom_nnue_eval.cpp \
+	nnuex/network.cpp nnuex/evaluate.cpp \
 	engine.cpp score.cpp memory.cpp
 
 HEADERS = benchmark.h bitboard.h evaluate.h misc.h movegen.h movepick.h history.h \
-		nnue/nnue_misc.h nnue/features/half_ka_v2_hm.h nnue/features/full_threats.h \
-		nnue/layers/affine_transform.h nnue/layers/affine_transform_sparse_input.h \
-		nnue/layers/clipped_relu.h nnue/layers/sqr_clipped_relu.h nnue/nnue_accumulator.h \
-		nnue/nnue_architecture.h nnue/nnue_common.h nnue/nnue_feature_transformer.h nnue/simd.h \
-		custom_nnue/custom_nnue_network.h custom_nnue/custom_nnue_eval.h \
+		nnuex/diff_stack.h nnuex/network.h nnuex/evaluate.h \
 		position.h search.h syzygy/tbprobe.h thread.h thread_win32_osx.h timeman.h \
-		tt.h tune.h types.h uci.h ucioption.h perft.h nnue/network.h engine.h score.h numa.h memory.h
+		tt.h tune.h types.h uci.h ucioption.h perft.h engine.h score.h numa.h memory.h
 
-OBJS = $(notdir $(SRCS:.cpp=.o))
+OBJS = $(SRCS:.cpp=.o)
 
-VPATH = syzygy:nnue:nnue/features:custom_nnue
+VPATH = syzygy:nnuex
 
 ### ==========================================================================
 ### Section 2. High-level Configuration
@@ -909,7 +903,7 @@ help:
 	echo "help                    > Display architecture details" && \
 	echo "profile-build           > standard build with profile-guided optimization" && \
 	echo "build                   > skip profile-guided optimization" && \
-	echo "net                     > Download the default nnue nets" && \
+	echo "net                     > Show NNUEX network-file guidance" && \
 	echo "strip                   > Strip executable" && \
 	echo "install                 > Install executable" && \
 	echo "clean                   > Clean up" && \
@@ -981,13 +975,13 @@ endif
 	clang-profile-use clang-profile-make FORCE \
 	format analyze
 
-analyze: net config-sanity objclean
+analyze: config-sanity objclean
 	$(MAKE) -k ARCH=$(ARCH) COMP=$(COMP) $(OBJS)
 
-build: net config-sanity
+build: config-sanity
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) all
 
-profile-build: net config-sanity objclean profileclean
+profile-build: config-sanity objclean profileclean
 	@echo ""
 	@echo "Step 1/4. Building instrumented executable ..."
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) $(profile_make)
@@ -1017,21 +1011,21 @@ clean: objclean profileclean
 
 # clean binaries and objects
 objclean:
-	@rm -f stockfish stockfish.exe *.o ./syzygy/*.o ./nnue/*.o ./nnue/features/*.o
+	@rm -f stockfish stockfish.exe *.o ./syzygy/*.o ./nnuex/*.o
 
 # clean auxiliary profiling files
 profileclean:
 	@rm -rf profdir
-	@rm -f bench.txt *.gcda *.gcno ./syzygy/*.gcda ./nnue/*.gcda ./nnue/features/*.gcda *.s PGOBENCH.out
+	@rm -f bench.txt *.gcda *.gcno ./syzygy/*.gcda ./syzygy/*.gcno ./nnuex/*.gcda ./nnuex/*.gcno *.s PGOBENCH.out
 	@rm -f stockfish.profdata *.profraw
 	@rm -f stockfish.*args*
 	@rm -f stockfish.*lt*
 	@rm -f stockfish.res
 	@rm -f ./-lstdc++.res
 
-# evaluation network (nnue)
+# evaluation network (nnuex)
 net:
-	@$(SHELL) ../scripts/net.sh
+	@echo "NNUEX networks are external runtime files. Set the UCI option EvalFile to a .nnuex path."
 
 format:
 	$(CLANG-FORMAT) -i $(SRCS) $(HEADERS) -style=file
@@ -1042,7 +1036,7 @@ format:
 
 all: $(EXE) .depend
 
-config-sanity: net
+config-sanity:
 	@echo ""
 	@echo "Config:" && \
 	echo "debug: '$(debug)'" && \
