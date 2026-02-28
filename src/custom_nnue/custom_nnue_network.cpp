@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -476,6 +477,154 @@ struct Header {
     std::uint32_t manifestFormatVersion = 0, npzSchemaVersion = 0;
 };
 
+bool checked_add_u64(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
+    if (a > std::numeric_limits<std::uint64_t>::max() - b)
+        return false;
+    out = a + b;
+    return true;
+}
+
+bool compute_nnuex_layout(const Header& h,
+                          std::size_t   fileSize,
+                          std::size_t&  payloadOffset,
+                          std::size_t&  payloadBytes,
+                          std::size_t&  metaOffset,
+                          std::size_t&  metaBytes,
+                          std::string&  err) {
+    std::uint64_t metaOffset64 = 0;
+    std::uint64_t fileEnd64    = 0;
+    if (!checked_add_u64(std::uint64_t(h.headerSize), h.tensorPayloadBytes, metaOffset64)
+        || !checked_add_u64(metaOffset64, h.metadataJsonBytes, fileEnd64))
+    {
+        err = "NNUEX header size fields overflow";
+        return false;
+    }
+
+    if (fileEnd64 > fileSize)
+    {
+        err = "Truncated nnuex file";
+        return false;
+    }
+
+    payloadOffset = std::size_t(h.headerSize);
+    payloadBytes  = std::size_t(h.tensorPayloadBytes);
+    metaOffset    = std::size_t(metaOffset64);
+    metaBytes     = std::size_t(h.metadataJsonBytes);
+    return true;
+}
+
+bool try_round_positive_i32_scale(float value, std::int32_t maxValue, std::int32_t& out) {
+    if (!std::isfinite(value) || value <= 0.0f)
+        return false;
+
+    const double maxRounded = double(maxValue) + 0.5;
+    if (double(value) >= maxRounded)
+        return false;
+
+    const long long rounded = std::llround(double(value));
+    if (rounded <= 0 || rounded > maxValue)
+        return false;
+
+    out = static_cast<std::int32_t>(rounded);
+    return true;
+}
+
+bool try_compute_positive_output_scale(const Header& h, std::int64_t& out) {
+    if (!std::isfinite(h.weightScaleOut) || !std::isfinite(h.nnue2score) || h.weightScaleOut <= 0.0f
+        || h.nnue2score <= 0.0f)
+        return false;
+
+    const double scaled = double(h.nnue2score) * double(h.weightScaleOut);
+    if (!std::isfinite(scaled))
+        return false;
+
+    const double maxRounded = double(std::numeric_limits<std::int64_t>::max()) - 0.5;
+    if (scaled < 0.5 || scaled > maxRounded)
+        return false;
+
+    const long long rounded = std::llround(scaled);
+    if (rounded <= 0)
+        return false;
+
+    out = static_cast<std::int64_t>(rounded);
+    return true;
+}
+
+bool validate_header_scaling(const Header& h, std::string& err) {
+    if (h.mixDenominator == 0)
+    {
+        err = "NNUEX header contains invalid mix denominator";
+        return false;
+    }
+
+    if (!std::isfinite(h.labelScalePsqt) || h.labelScalePsqt <= 0.0f || !std::isfinite(h.labelScalePositional)
+        || h.labelScalePositional <= 0.0f)
+    {
+        err = "NNUEX header contains invalid label scales";
+        return false;
+    }
+
+    std::int32_t ftQuantizedOne     = 0;
+    std::int32_t hiddenQuantizedOne = 0;
+    std::int32_t weightScaleHidden  = 0;
+    std::int64_t outputScale        = 0;
+    if (!try_round_positive_i32_scale(h.ftQuantizedOne, std::numeric_limits<std::int32_t>::max(),
+                                      ftQuantizedOne))
+    {
+        err = "NNUEX header contains invalid ftQuantizedOne";
+        return false;
+    }
+    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, 255, hiddenQuantizedOne))
+    {
+        err = "NNUEX header contains invalid hiddenQuantizedOne";
+        return false;
+    }
+    if (!try_round_positive_i32_scale(h.weightScaleHidden, std::numeric_limits<std::int32_t>::max(),
+                                      weightScaleHidden))
+    {
+        err = "NNUEX header contains invalid weightScaleHidden";
+        return false;
+    }
+    if (!try_compute_positive_output_scale(h, outputScale))
+    {
+        err = "NNUEX header contains invalid output scaling constants";
+        return false;
+    }
+
+    return true;
+}
+
+bool cache_validated_runtime_scaling(const Header& h,
+                                     std::int32_t& ftQuantizedOne,
+                                     std::int32_t& hiddenQuantizedOne,
+                                     std::int32_t& weightScaleHidden,
+                                     std::int64_t& outputScale,
+                                     std::string&  err) {
+    if (!try_round_positive_i32_scale(h.ftQuantizedOne, std::numeric_limits<std::int32_t>::max(),
+                                      ftQuantizedOne))
+    {
+        err = "NNUEX header contains invalid ftQuantizedOne";
+        return false;
+    }
+    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, 255, hiddenQuantizedOne))
+    {
+        err = "NNUEX header contains invalid hiddenQuantizedOne";
+        return false;
+    }
+    if (!try_round_positive_i32_scale(h.weightScaleHidden, std::numeric_limits<std::int32_t>::max(),
+                                      weightScaleHidden))
+    {
+        err = "NNUEX header contains invalid weightScaleHidden";
+        return false;
+    }
+    if (!try_compute_positive_output_scale(h, outputScale))
+    {
+        err = "NNUEX header contains invalid output scaling constants";
+        return false;
+    }
+    return true;
+}
+
 bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t>& fileBytes,
                                                   const Header&                    h,
                                                   int&                             outScale,
@@ -484,16 +633,15 @@ bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t
     if ((h.flags & 1u) == 0 || h.metadataJsonBytes == 0)
         return true;
 
-    const std::uint64_t metaOffset = std::uint64_t(h.headerSize) + h.tensorPayloadBytes;
-    const std::uint64_t metaEnd    = metaOffset + h.metadataJsonBytes;
-    if (metaEnd > fileBytes.size())
-    {
-        err = "Truncated metadata JSON blob";
+    std::size_t payloadOffset = 0;
+    std::size_t payloadBytes  = 0;
+    std::size_t metaOffset    = 0;
+    std::size_t metaBytes     = 0;
+    if (!compute_nnuex_layout(h, fileBytes.size(), payloadOffset, payloadBytes, metaOffset, metaBytes, err))
         return false;
-    }
 
-    const auto* data = reinterpret_cast<const char*>(fileBytes.data() + std::size_t(metaOffset));
-    std::string_view metadataJson(data, std::size_t(h.metadataJsonBytes));
+    const auto* data = reinterpret_cast<const char*>(fileBytes.data() + metaOffset);
+    std::string_view metadataJson(data, metaBytes);
 
     // Metadata parsing is best-effort for backward compatibility. If the key is absent, fall back to legacy scale=1.
     int parsedScale = 0;
@@ -621,17 +769,17 @@ bool parse_header(const std::vector<std::uint8_t>& fileBytes, Header& h, std::st
         err = "NNUEX dimensions do not match frozen custom contract";
         return false;
     }
-    if (h.mixDenominator == 0 || h.ftQuantizedOne == 0.0f || h.hiddenQuantizedOne == 0.0f
-        || h.weightScaleHidden == 0.0f || h.weightScaleOut == 0.0f || h.nnue2score == 0.0f)
-    {
-        err = "NNUEX header contains invalid scaling constants";
+    if (!validate_header_scaling(h, err))
         return false;
-    }
 
-    const std::uint64_t totalNeed = std::uint64_t(h.headerSize) + h.tensorPayloadBytes + h.metadataJsonBytes;
-    if (totalNeed > fileBytes.size())
+    std::size_t payloadOffset = 0;
+    std::size_t payloadBytes  = 0;
+    std::size_t metaOffset    = 0;
+    std::size_t metaBytes     = 0;
+    if (!compute_nnuex_layout(h, fileBytes.size(), payloadOffset, payloadBytes, metaOffset, metaBytes, err))
     {
-        err = "Truncated nnuex file";
+        if (err == "NNUEX header size fields overflow")
+            err = "NNUEX header contains overflowing layout sizes";
         return false;
     }
     return true;
@@ -750,10 +898,12 @@ std::string hex_bytes(const std::array<std::uint8_t, N>& a) {
 }
 
 bool verify_file_checksums(const std::vector<std::uint8_t>& fileBytes, const Header& h, std::string& err) {
-    const std::size_t payloadOffset = std::size_t(h.headerSize);
-    const std::size_t payloadBytes  = std::size_t(h.tensorPayloadBytes);
-    const std::size_t metaOffset    = payloadOffset + payloadBytes;
-    const std::size_t metaBytes     = std::size_t(h.metadataJsonBytes);
+    std::size_t payloadOffset = 0;
+    std::size_t payloadBytes  = 0;
+    std::size_t metaOffset    = 0;
+    std::size_t metaBytes     = 0;
+    if (!compute_nnuex_layout(h, fileBytes.size(), payloadOffset, payloadBytes, metaOffset, metaBytes, err))
+        return false;
 
     const auto payloadDigest = sha256_bytes(fileBytes.data() + payloadOffset, payloadBytes);
     if (payloadDigest != h.tensorPayloadSha256)
@@ -1014,6 +1164,10 @@ struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
     int    engineValueOutputScale = kDefaultEngineValueOutputScale;
+    std::int32_t ftQuantizedOne    = 0;
+    std::int32_t hiddenQuantizedOne = 0;
+    std::int32_t weightScaleHidden  = 0;
+    std::int64_t outputScale        = 0;
 
     std::vector<std::int16_t> hidden1Weight;
     std::vector<std::int16_t> hidden1Bias;
@@ -1117,6 +1271,10 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
 
     auto newImpl = std::make_unique<Impl>();
     if (!parse_header(bytes, newImpl->header, err))
+        return false;
+    if (!cache_validated_runtime_scaling(newImpl->header, newImpl->ftQuantizedOne,
+                                         newImpl->hiddenQuantizedOne, newImpl->weightScaleHidden,
+                                         newImpl->outputScale, err))
         return false;
     if (!verify_file_checksums(bytes, newImpl->header, err))
         return false;
@@ -1363,8 +1521,15 @@ namespace {
 
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err) {
     const Header& h = impl.header;
-    const auto*   p = fileBytes.data() + h.headerSize;
-    ByteReader    rd(p, p + std::size_t(h.tensorPayloadBytes));
+    std::size_t   payloadOffset = 0;
+    std::size_t   payloadBytes  = 0;
+    std::size_t   metaOffset    = 0;
+    std::size_t   metaBytes     = 0;
+    if (!compute_nnuex_layout(h, fileBytes.size(), payloadOffset, payloadBytes, metaOffset, metaBytes, err))
+        return false;
+
+    const auto* p = fileBytes.data() + payloadOffset;
+    ByteReader  rd(p, p + payloadBytes);
 
     if (!read_raw_array<std::int16_t>(rd, std::size_t(kExpectedInputSize) * kExpectedH1Total, impl.hidden1Weight)
         || !read_raw_array<std::int16_t>(rd, kExpectedH1Total, impl.hidden1Bias))
@@ -1611,8 +1776,8 @@ void refresh_h1_clip(const Network::Impl& impl,
         ++metrics->h1ClipCalls;
     ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->h1ClipNs : nullptr);
 
-    const std::int32_t ftQuantizedOne     = static_cast<std::int32_t>(std::llround(impl.header.ftQuantizedOne));
-    const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(impl.header.hiddenQuantizedOne));
+    const std::int32_t ftQuantizedOne     = impl.ftQuantizedOne;
+    const std::int32_t hiddenQuantizedOne = impl.hiddenQuantizedOne;
 #if CUSTOM_NNUE_HAS_AVX2_INTRINSICS
     if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
     {
@@ -1646,10 +1811,9 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     if (state.bucket16 < 0 || state.bucket16 >= int(kExpectedBucketCount))
         return std::nullopt;
 
-    const std::int32_t hiddenQuantizedOne = static_cast<std::int32_t>(std::llround(h.hiddenQuantizedOne));
-    const std::int32_t weightScaleHidden   = static_cast<std::int32_t>(std::llround(h.weightScaleHidden));
-    const std::int64_t outScale =
-      static_cast<std::int64_t>(std::llround(double(h.nnue2score) * double(h.weightScaleOut)));
+    const std::int32_t hiddenQuantizedOne = impl.hiddenQuantizedOne;
+    const std::int32_t weightScaleHidden  = impl.weightScaleHidden;
+    const std::int64_t outScale           = impl.outputScale;
 
     std::array<std::uint8_t, kExpectedPsqtH2> psqtH2{};
     std::array<std::uint8_t, kExpectedPsqtH3> psqtH3{};

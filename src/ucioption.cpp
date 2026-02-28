@@ -21,14 +21,35 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 #include "misc.h"
 
 namespace Stockfish {
+
+namespace {
+
+bool try_parse_int_strict(std::string_view text, int& out) {
+    if (text.empty())
+        return false;
+
+    const char* begin = text.data();
+    const char* end   = begin + text.size();
+    int         value = 0;
+    const auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end)
+        return false;
+
+    out = value;
+    return true;
+}
+
+}
 
 bool CaseInsensitiveLess::operator()(const std::string& s1, const std::string& s2) const {
 
@@ -129,7 +150,13 @@ Option::Option(const char* v, const char* cur, OnChange f) :
 
 Option::operator int() const {
     assert(type == "check" || type == "spin");
-    return (type == "spin" ? std::stoi(currentValue) : currentValue == "true");
+    if (type != "spin")
+        return currentValue == "true";
+
+    int parsed = 0;
+    const bool ok = try_parse_int_strict(currentValue, parsed);
+    assert(ok);
+    return ok ? parsed : 0;
 }
 
 Option::operator std::string() const {
@@ -152,9 +179,10 @@ Option& Option::operator=(const std::string& v) {
 
     assert(!type.empty());
 
+    int parsedSpin = 0;
     if ((type != "button" && type != "string" && v.empty())
         || (type == "check" && v != "true" && v != "false")
-        || (type == "spin" && (std::stoi(v) < min || std::stoi(v) > max)))
+        || (type == "spin" && (!try_parse_int_strict(v, parsedSpin) || parsedSpin < min || parsedSpin > max)))
         return *this;
 
     if (type == "combo")
@@ -202,8 +230,14 @@ std::ostream& operator<<(std::ostream& os, const OptionsMap& om) {
                 }
 
                 else if (o.type == "spin")
-                    os << " default " << stoi(o.defaultValue) << " min " << o.min << " max "
-                       << o.max;
+                {
+                    int parsedDefault = 0;
+                    if (try_parse_int_strict(o.defaultValue, parsedDefault))
+                        os << " default " << parsedDefault;
+                    else
+                        os << " default " << o.defaultValue;
+                    os << " min " << o.min << " max " << o.max;
+                }
 
                 break;
             }
