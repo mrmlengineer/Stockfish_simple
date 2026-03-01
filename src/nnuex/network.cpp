@@ -1735,55 +1735,6 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
     return true;
 }
 
-void apply_h1_feature_delta(const Network::Impl& impl,
-                            int                  featureIndex,
-                            int                  sign,
-                            std::array<std::int32_t, kExpectedH1Total>& h1Pre) {
-    const auto* row = impl.hidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Total;
-    for (std::size_t j = 0; j < kExpectedH1Total; ++j)
-        h1Pre[j] += sign * std::int32_t(row[j]);
-}
-
-#if NNUEX_HAS_AVX2_INTRINSICS
-void refresh_h1_clip_avx2_exact(const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
-                                std::array<std::uint8_t, kExpectedH1Total>&       h1Clip,
-                                std::int32_t                                       ftQuantizedOne,
-                                std::int32_t                                       hiddenQuantizedOne) {
-    const __m256i zero32     = _mm256_setzero_si256();
-    const __m256d hiddenQd   = _mm256_set1_pd(double(hiddenQuantizedOne));
-    const __m256d hiddenQ0d  = _mm256_setzero_pd();
-    const __m256d denomD     = _mm256_set1_pd(double(ftQuantizedOne));
-    const __m256d halfD      = _mm256_set1_pd(double(ftQuantizedOne / 2));
-
-    for (std::size_t j = 0; j < kExpectedH1Total; j += 8)
-    {
-        const __m256i x32    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(h1Pre.data() + j));
-        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);
-
-        const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
-        const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
-
-        __m256d qLo = _mm256_div_pd(
-          _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
-        __m256d qHi = _mm256_div_pd(
-          _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
-
-        // Clamp in double before int conversion. This preserves exact output semantics:
-        // negatives are already clamped to zero (equivalent after final clip), and any
-        // value above hiddenQuantizedOne saturates to hiddenQuantizedOne before packing.
-        qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
-        qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
-
-        const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
-        const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
-        const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
-        const __m128i q8    = _mm_packus_epi16(q16, q16);
-
-        _mm_storel_epi64(reinterpret_cast<__m128i*>(h1Clip.data() + j), q8);
-    }
-}
-#endif
-
 const std::int16_t* h1_feature_row(const Network::Impl& impl, int featureIndex) {
     if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
         return nullptr;
@@ -1928,29 +1879,85 @@ bool fused_h1_update_castling_exact(const Network::Impl&                        
       nextH1Clip);
 }
 
-void refresh_h1_clip(const Network::Impl& impl,
-                     const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
-                     std::array<std::uint8_t, kExpectedH1Total>&       h1Clip) {
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->h1ClipCalls;
-    ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->h1ClipNs : nullptr);
+bool build_h1_sparse_exact(const Network::Impl&                          impl,
+                           const EncodedFen&                             enc,
+                           std::array<std::int32_t, kExpectedH1Total>&   outH1Pre,
+                           std::array<std::uint8_t, kExpectedH1Total>&   outH1Clip) {
+    if (enc.activeFeatureCount > enc.activeFeatureIndices.size())
+        return false;
+
+    std::array<const std::int16_t*, kMaxActiveFeatures> rows{};
+    for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+    {
+        rows[i] = h1_feature_row(impl, enc.activeFeatureIndices[i]);
+        if (!rows[i])
+            return false;
+    }
 
     const std::int32_t ftQuantizedOne     = impl.ftQuantizedOne;
     const std::int32_t hiddenQuantizedOne = impl.hiddenQuantizedOne;
+
 #if NNUEX_HAS_AVX2_INTRINSICS
     if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
     {
-        refresh_h1_clip_avx2_exact(h1Pre, h1Clip, ftQuantizedOne, hiddenQuantizedOne);
-        return;
+        const __m256i zero32    = _mm256_setzero_si256();
+        const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
+        const __m256d hiddenQ0d = _mm256_setzero_pd();
+        const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
+        const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
+
+        for (std::size_t j = 0; j < kExpectedH1Total; j += 8)
+        {
+            const __m128i bias16 =
+              _mm_loadu_si128(reinterpret_cast<const __m128i*>(impl.hidden1Bias.data() + j));
+            __m256i acc = _mm256_cvtepi16_epi32(bias16);
+
+            for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+            {
+                const __m128i row16 =
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
+                acc = _mm256_add_epi32(acc, _mm256_cvtepi16_epi32(row16));
+            }
+
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre.data() + j), acc);
+
+            const __m256i xPos32 = _mm256_max_epi32(acc, zero32);
+            const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
+            const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+
+            __m256d qLo = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
+            __m256d qHi = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
+
+            qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
+            qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
+
+            const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
+            const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
+            const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
+            const __m128i q8    = _mm_packus_epi16(q16, q16);
+
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(outH1Clip.data() + j), q8);
+        }
+
+        return true;
     }
 #endif
+
     for (std::size_t j = 0; j < kExpectedH1Total; ++j)
     {
+        std::int32_t acc = impl.hidden1Bias[j];
+        for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+            acc += std::int32_t(rows[i][j]);
+
+        outH1Pre[j] = acc;
         const std::int64_t scaled =
-          round_div_symmetric_i64(std::int64_t(h1Pre[j]) * hiddenQuantizedOne, ftQuantizedOne);
-        h1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
+          round_div_symmetric_i64(std::int64_t(acc) * hiddenQuantizedOne, ftQuantizedOne);
+        outH1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
     }
+
+    return true;
 }
 
 std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
@@ -2038,11 +2045,9 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
         ++metrics->buildPreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->buildPreClipNs : nullptr);
-        std::copy(impl.hidden1Bias.begin(), impl.hidden1Bias.end(), out.h1Pre.begin());
-        for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-            apply_h1_feature_delta(impl, enc.activeFeatureIndices[i], +1, out.h1Pre);
+        if (!build_h1_sparse_exact(impl, enc, out.h1Pre, out.h1Clip))
+            return false;
     }
-    refresh_h1_clip(impl, out.h1Pre, out.h1Clip);
 
     out.valid     = true;
     out.key       = key;
