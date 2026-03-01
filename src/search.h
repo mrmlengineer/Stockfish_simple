@@ -296,6 +296,12 @@ struct NNUEXMetrics {
     Eval::NNUEX::RuntimeMetrics runtime{};
 };
 
+enum class NNUEXMode {
+    Full,
+    Incremental,
+    Auto
+};
+
 // Search::Worker is the class that does the actual search.
 // It is instantiated once per thread, and it is responsible for keeping track
 // of the search history, and storing data required for the search.
@@ -341,12 +347,14 @@ class Worker {
     void undo_move(Position& pos, const Move move);
     void undo_null_move(Position& pos);
     void refresh_nnuex_option_cache();
-    bool use_nnuex_incremental_mode() const;
+    bool use_nnuex_incremental_stack() const;
+    bool use_nnuex_lazy_incremental_stack() const;
     bool use_nnuex_metrics() const;
     void reset_nnuex_incremental_stack();
     void push_nnuex_incremental_move(const Position& posAfterMove, Move move, const DirtyPiece& dirtyPiece);
     void push_nnuex_incremental_null(const Position& posAfterNull);
     void pop_nnuex_incremental();
+    bool materialize_nnuex_incremental_top(const Position& pos, Eval::NNUEX::IncrementalState*& inc);
 
     // This is the main search function, for both PV and non-PV nodes
     template<NodeType nodeType>
@@ -399,18 +407,29 @@ class Worker {
     TranspositionTable&                             tt;
     const LazyNumaReplicated<Eval::NNUEX::Network>& nnuex;
 
+    struct NNUEXAccumulatorEntry {
+        Eval::NNUEX::IncrementalState state{};
+        Move                          move = Move::none();
+        DirtyPiece                    dirtyPiece{NO_PIECE, SQ_NONE, SQ_NONE, SQ_NONE, SQ_NONE,
+                                                 NO_PIECE, NO_PIECE};
+        Key                           key      = 0;
+        std::uint8_t                  stmBlack = 0;
+        bool                          computed = false;
+        bool                          isNull   = false;
+    };
+
     // Used by NNUEX
-    Eval::NNUEX::DiffStack<>                    nnuexDiffs;
-    static constexpr std::size_t                nnuexAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
-    std::array<Eval::NNUEX::IncrementalState, nnuexAccumulatorCapacity> nnuexAccumulatorStack{};
-    std::size_t                                 nnuexAccumulatorSize = 0;
-    std::uint64_t                               nnuexParityChecks     = 0;
-    std::uint64_t                               nnuexParityMismatches = 0;
-    std::uint64_t                               nnuexParityLogs       = 0;
-    bool                                        nnuexIncrementalEnabledCached = false;
-    bool                                        nnuexMetricsEnabledCached     = false;
-    bool                                        nnuexParityEnabledCached      = false;
-    NNUEXMetrics                                nnuexMetrics{};
+    Eval::NNUEX::DiffStack<>                              nnuexDiffs;
+    static constexpr std::size_t                          nnuexAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
+    std::array<NNUEXAccumulatorEntry, nnuexAccumulatorCapacity> nnuexAccumulatorStack{};
+    std::size_t                                           nnuexAccumulatorSize = 0;
+    std::uint64_t                                         nnuexParityChecks     = 0;
+    std::uint64_t                                         nnuexParityMismatches = 0;
+    std::uint64_t                                         nnuexParityLogs       = 0;
+    NNUEXMode                                             nnuexModeCached = NNUEXMode::Full;
+    bool                                                  nnuexMetricsEnabledCached     = false;
+    bool                                                  nnuexParityEnabledCached      = false;
+    NNUEXMetrics                                          nnuexMetrics{};
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

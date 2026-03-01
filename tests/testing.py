@@ -14,7 +14,7 @@ import pathlib
 import concurrent.futures
 import tempfile
 import shutil
-import requests
+from urllib.request import Request, urlopen
 
 CYAN_COLOR = "\033[36m"
 GRAY_COLOR = "\033[2m"
@@ -96,10 +96,14 @@ class Syzygy:
             with tempfile.TemporaryDirectory() as tmpdirname:
                 tarball_path = os.path.join(tmpdirname, f"{file}.tar.gz")
 
-                response = requests.get(url, stream=True)
+                request = Request(url, headers={"User-Agent": "stockfish-tests"})
                 with open(tarball_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                    with urlopen(request) as response:
+                        while True:
+                            chunk = response.read(8192)
+                            if not chunk:
+                                break
+                            f.write(chunk)
 
                 with tarfile.open(tarball_path, "r:gz") as tar:
                     tar.extractall(tmpdirname)

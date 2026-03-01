@@ -94,11 +94,21 @@ class Network {
     std::optional<Evaluation> evaluate(const Position& pos) const;
     std::optional<Evaluation> evaluate(const IncrementalState& state) const;
     bool                      build_incremental_state(const Position& pos, IncrementalState& out) const;
+    bool                      advance_incremental_state_from_meta(Move                  move,
+                                                                  const DirtyPiece&     dirtyPiece,
+                                                                  const IncrementalState& prev,
+                                                                  Key                   nextKey,
+                                                                  int                   nextStmBlack,
+                                                                  IncrementalState&     next) const;
     bool                      advance_incremental_state(const Position&       posAfterMove,
                                                         Move                  move,
                                                         const DirtyPiece&     dirtyPiece,
                                                         const IncrementalState& prev,
                                                         IncrementalState&     next) const;
+    bool                      advance_incremental_state_null_from_meta(const IncrementalState& prev,
+                                                                       Key                   nextKey,
+                                                                       int                   nextStmBlack,
+                                                                       IncrementalState&     next) const;
     bool                      advance_incremental_state_null(const Position&        posAfterNull,
                                                              const IncrementalState& prev,
                                                              IncrementalState&      next) const;

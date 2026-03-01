@@ -135,7 +135,7 @@ Engine::Engine(std::optional<std::string> path) :
           return std::nullopt;
       }));
 
-    options.add("NNUEXMode", Option("full incremental", "full"));
+    options.add("NNUEXMode", Option("full incremental auto", "full"));
     options.add("NNUEXParityCheck", Option(false));
     options.add("NNUEXMetrics", Option(false));
 

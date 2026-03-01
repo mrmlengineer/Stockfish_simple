@@ -1144,16 +1144,18 @@ bool build_incremental_state_from_encoded(const Network::Impl&  impl,
                                           const EncodedFen&     enc,
                                           Key                   key,
                                           IncrementalState&     out);
-bool advance_incremental_state_impl(const Network::Impl&   impl,
-                                    const Position&        posAfterMove,
-                                    Move                   move,
-                                    const DirtyPiece&      dirtyPiece,
-                                    const IncrementalState& prev,
-                                    IncrementalState&      next);
-bool advance_incremental_state_null_impl(const Network::Impl&   impl,
-                                         const Position&        posAfterNull,
-                                         const IncrementalState& prev,
-                                         IncrementalState&      next);
+bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
+                                              Move                   move,
+                                              const DirtyPiece&      dirtyPiece,
+                                              const IncrementalState& prev,
+                                              Key                    nextKey,
+                                              int                    nextStmBlack,
+                                              IncrementalState&      next);
+bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
+                                                   const IncrementalState& prev,
+                                                   Key                    nextKey,
+                                                   int                    nextStmBlack,
+                                                   IncrementalState&      next);
 std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& impl,
                                                           const IncrementalState& state);
 
@@ -1380,24 +1382,45 @@ bool Network::build_incremental_state(const Position& pos, IncrementalState& out
     return build_incremental_state_from_encoded(*impl_, enc, pos.key(), out);
 }
 
+bool Network::advance_incremental_state_from_meta(Move                   move,
+                                                  const DirtyPiece&      dirtyPiece,
+                                                  const IncrementalState& prev,
+                                                  Key                    nextKey,
+                                                  int                    nextStmBlack,
+                                                  IncrementalState&      next) const {
+    next = IncrementalState{};
+    if (!initialized_ || impl_ == nullptr || !prev.valid)
+        return false;
+    return advance_incremental_state_from_meta_impl(*impl_, move, dirtyPiece, prev, nextKey,
+                                                    nextStmBlack, next);
+}
+
 bool Network::advance_incremental_state(const Position&        posAfterMove,
                                         Move                   move,
                                         const DirtyPiece&      dirtyPiece,
                                         const IncrementalState& prev,
                                         IncrementalState&      next) const {
+    return advance_incremental_state_from_meta(move, dirtyPiece, prev, posAfterMove.key(),
+                                               posAfterMove.side_to_move() == BLACK ? 1 : 0, next);
+}
+
+bool Network::advance_incremental_state_null_from_meta(const IncrementalState& prev,
+                                                       Key                    nextKey,
+                                                       int                    nextStmBlack,
+                                                       IncrementalState&      next) const {
     next = IncrementalState{};
     if (!initialized_ || impl_ == nullptr || !prev.valid)
         return false;
-    return advance_incremental_state_impl(*impl_, posAfterMove, move, dirtyPiece, prev, next);
+    return advance_incremental_state_null_from_meta_impl(*impl_, prev, nextKey, nextStmBlack,
+                                                         next);
 }
 
 bool Network::advance_incremental_state_null(const Position&        posAfterNull,
                                              const IncrementalState& prev,
                                              IncrementalState&      next) const {
-    next = IncrementalState{};
-    if (!initialized_ || impl_ == nullptr || !prev.valid)
-        return false;
-    return advance_incremental_state_null_impl(*impl_, posAfterNull, prev, next);
+    return advance_incremental_state_null_from_meta(prev, posAfterNull.key(),
+                                                    posAfterNull.side_to_move() == BLACK ? 1 : 0,
+                                                    next);
 }
 
 namespace {
@@ -1903,12 +1926,13 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
     return true;
 }
 
-bool advance_incremental_state_impl(const Network::Impl&   impl,
-                                    const Position&        posAfterMove,
-                                    Move                   move,
-                                    const DirtyPiece&      dirtyPiece,
-                                    const IncrementalState& prev,
-                                    IncrementalState&      next) {
+bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
+                                              Move                   move,
+                                              const DirtyPiece&      dirtyPiece,
+                                              const IncrementalState& prev,
+                                              Key                    nextKey,
+                                              int                    nextStmBlack,
+                                              IncrementalState&      next) {
     if (!prev.valid)
         return false;
 
@@ -1972,22 +1996,23 @@ bool advance_incremental_state_impl(const Network::Impl&   impl,
             }
         }
 
-        if (!apply_stm_toggle(posAfterMove.side_to_move() == BLACK ? 1 : 0))
+        if (!apply_stm_toggle(nextStmBlack))
             return false;
     }
 
     next.pieceCount = prev.pieceCount - (capture ? 1 : 0);
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
-    next.key = posAfterMove.key();
+    next.key = nextKey;
     refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
 }
 
-bool advance_incremental_state_null_impl(const Network::Impl&   impl,
-                                         const Position&        posAfterNull,
-                                         const IncrementalState& prev,
-                                         IncrementalState&      next) {
+bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
+                                                   const IncrementalState& prev,
+                                                   Key                    nextKey,
+                                                   int                    nextStmBlack,
+                                                   IncrementalState&      next) {
     if (!prev.valid)
         return false;
     next.valid     = false;
@@ -2003,17 +2028,16 @@ bool advance_incremental_state_null_impl(const Network::Impl&   impl,
         ++metrics->advanceNullPreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
-        const int newStmBlack = posAfterNull.side_to_move() == BLACK ? 1 : 0;
-        if (newStmBlack != next.stmBlack)
+        if (nextStmBlack != next.stmBlack)
         {
-            const int sign = newStmBlack ? +1 : -1;
+            const int sign = nextStmBlack ? +1 : -1;
             apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
-            next.stmBlack = newStmBlack;
+            next.stmBlack = nextStmBlack;
         }
     }
 
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
-    next.key = posAfterNull.key();
+    next.key = nextKey;
     refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
