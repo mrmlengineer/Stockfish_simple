@@ -1784,6 +1784,150 @@ void refresh_h1_clip_avx2_exact(const std::array<std::int32_t, kExpectedH1Total>
 }
 #endif
 
+const std::int16_t* h1_feature_row(const Network::Impl& impl, int featureIndex) {
+    if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
+        return nullptr;
+    return impl.hidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Total;
+}
+
+const std::int16_t* h1_piece_row(const Network::Impl& impl, Piece pc, Square sq) {
+    int idx = -1;
+    if (!feature_index_for_piece_square(pc, sq, idx))
+        return nullptr;
+    return h1_feature_row(impl, idx);
+}
+
+template<std::size_t RowCount>
+bool fused_h1_update_rows_exact(const std::array<std::int32_t, kExpectedH1Total>& prevH1Pre,
+                                const std::array<const std::int16_t*, RowCount>&  rows,
+                                const std::array<int, RowCount>&                  signs,
+                                std::int32_t                                      ftQuantizedOne,
+                                std::int32_t                                      hiddenQuantizedOne,
+                                std::array<std::int32_t, kExpectedH1Total>&       nextH1Pre,
+                                std::array<std::uint8_t, kExpectedH1Total>&       nextH1Clip) {
+    for (const auto* row : rows)
+        if (!row)
+            return false;
+
+#if NNUEX_HAS_AVX2_INTRINSICS
+    if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
+    {
+        const __m256i zero32    = _mm256_setzero_si256();
+        const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
+        const __m256d hiddenQ0d = _mm256_setzero_pd();
+        const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
+        const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
+
+        for (std::size_t j = 0; j < kExpectedH1Total; j += 8)
+        {
+            __m256i acc =
+              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
+
+            for (std::size_t i = 0; i < RowCount; ++i)
+            {
+                const int sign = signs[i];
+                if (!sign)
+                    continue;
+
+                const __m128i row16 =
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
+                const __m256i row32 = _mm256_cvtepi16_epi32(row16);
+                acc                 = sign > 0 ? _mm256_add_epi32(acc, row32)
+                                               : _mm256_sub_epi32(acc, row32);
+            }
+
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
+
+            const __m256i xPos32 = _mm256_max_epi32(acc, zero32);
+            const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
+            const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+
+            __m256d qLo = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
+            __m256d qHi = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
+
+            qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
+            qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
+
+            const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
+            const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
+            const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
+            const __m128i q8    = _mm_packus_epi16(q16, q16);
+
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), q8);
+        }
+
+        return true;
+    }
+#endif
+
+    for (std::size_t j = 0; j < kExpectedH1Total; ++j)
+    {
+        std::int32_t acc = prevH1Pre[j];
+        for (std::size_t i = 0; i < RowCount; ++i)
+            acc += signs[i] * std::int32_t(rows[i][j]);
+
+        nextH1Pre[j] = acc;
+        const std::int64_t scaled =
+          round_div_symmetric_i64(std::int64_t(acc) * hiddenQuantizedOne, ftQuantizedOne);
+        nextH1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
+    }
+
+    return true;
+}
+
+bool fused_h1_update_null_exact(const Network::Impl&                          impl,
+                                const std::array<std::int32_t, kExpectedH1Total>& prevH1Pre,
+                                int                                              stmSign,
+                                std::array<std::int32_t, kExpectedH1Total>&      nextH1Pre,
+                                std::array<std::uint8_t, kExpectedH1Total>&      nextH1Clip) {
+    return fused_h1_update_rows_exact<1>(prevH1Pre, {h1_feature_row(impl, 736)}, {stmSign},
+                                         impl.ftQuantizedOne, impl.hiddenQuantizedOne, nextH1Pre,
+                                         nextH1Clip);
+}
+
+bool fused_h1_update_quiet_exact(const Network::Impl&                          impl,
+                                 const std::array<std::int32_t, kExpectedH1Total>& prevH1Pre,
+                                 const std::int16_t*                              fromRow,
+                                 const std::int16_t*                              toRow,
+                                 int                                              stmSign,
+                                 std::array<std::int32_t, kExpectedH1Total>&      nextH1Pre,
+                                 std::array<std::uint8_t, kExpectedH1Total>&      nextH1Clip) {
+    return fused_h1_update_rows_exact<3>(prevH1Pre, {fromRow, toRow, h1_feature_row(impl, 736)},
+                                         {-1, +1, stmSign}, impl.ftQuantizedOne,
+                                         impl.hiddenQuantizedOne, nextH1Pre, nextH1Clip);
+}
+
+bool fused_h1_update_capture_exact(const Network::Impl&                          impl,
+                                   const std::array<std::int32_t, kExpectedH1Total>& prevH1Pre,
+                                   const std::int16_t*                              fromRow,
+                                   const std::int16_t*                              toRow,
+                                   const std::int16_t*                              captureRow,
+                                   int                                              stmSign,
+                                   std::array<std::int32_t, kExpectedH1Total>&      nextH1Pre,
+                                   std::array<std::uint8_t, kExpectedH1Total>&      nextH1Clip) {
+    return fused_h1_update_rows_exact<4>(
+      prevH1Pre, {fromRow, toRow, captureRow, h1_feature_row(impl, 736)}, {-1, +1, -1, stmSign},
+      impl.ftQuantizedOne, impl.hiddenQuantizedOne, nextH1Pre, nextH1Clip);
+}
+
+bool fused_h1_update_castling_exact(const Network::Impl&                          impl,
+                                    const std::array<std::int32_t, kExpectedH1Total>& prevH1Pre,
+                                    const std::int16_t*                              kingFromRow,
+                                    const std::int16_t*                              kingToRow,
+                                    const std::int16_t*                              rookFromRow,
+                                    const std::int16_t*                              rookToRow,
+                                    int                                              stmSign,
+                                    std::array<std::int32_t, kExpectedH1Total>&      nextH1Pre,
+                                    std::array<std::uint8_t, kExpectedH1Total>&      nextH1Clip) {
+    return fused_h1_update_rows_exact<5>(
+      prevH1Pre,
+      {kingFromRow, kingToRow, rookFromRow, rookToRow, h1_feature_row(impl, 736)},
+      {-1, +1, -1, +1, stmSign}, impl.ftQuantizedOne, impl.hiddenQuantizedOne, nextH1Pre,
+      nextH1Clip);
+}
+
 void refresh_h1_clip(const Network::Impl& impl,
                      const std::array<std::int32_t, kExpectedH1Total>& h1Pre,
                      std::array<std::uint8_t, kExpectedH1Total>&       h1Clip) {
@@ -1807,18 +1951,6 @@ void refresh_h1_clip(const Network::Impl& impl,
           round_div_symmetric_i64(std::int64_t(h1Pre[j]) * hiddenQuantizedOne, ftQuantizedOne);
         h1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
     }
-}
-
-bool apply_piece_toggle(const Network::Impl& impl,
-                        Piece                pc,
-                        Square               sq,
-                        int                  sign,
-                        std::array<std::int32_t, kExpectedH1Total>& h1Pre) {
-    int idx = -1;
-    if (!feature_index_for_piece_square(pc, sq, idx))
-        return false;
-    apply_h1_feature_delta(impl, idx, sign, h1Pre);
-    return true;
 }
 
 std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
@@ -1937,68 +2069,65 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
     next.bucket8    = prev.bucket8;
     next.stmBlack   = prev.stmBlack;
     next.bucket16   = prev.bucket16;
-    next.h1Pre      = prev.h1Pre;
-
-    auto apply_stm_toggle = [&](int newStmBlack) {
-        if (newStmBlack == next.stmBlack)
-            return true;
-        const int sign = newStmBlack ? +1 : -1;
-        apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
-        next.stmBlack = newStmBlack;
-        return true;
-    };
 
     if (dirtyPiece.pc == NO_PIECE || dirtyPiece.from == SQ_NONE)
         return false;
 
     const bool castling = move.type_of() == CASTLING;
     const bool capture  = dirtyPiece.remove_sq != SQ_NONE && !castling;
+    const int  stmSign  = nextStmBlack == prev.stmBlack ? 0 : (nextStmBlack ? +1 : -1);
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     if (metrics)
         ++metrics->advanceMovePreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceMovePreClipNs : nullptr);
-        if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.from, -1, next.h1Pre))
+        const auto* fromRow = h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.from);
+        if (!fromRow)
             return false;
 
-        if (dirtyPiece.to != SQ_NONE)
-        {
-            if (!apply_piece_toggle(impl, dirtyPiece.pc, dirtyPiece.to, +1, next.h1Pre))
-                return false;
-        }
-
+        bool ok = false;
         if (castling)
         {
             if (dirtyPiece.remove_sq == SQ_NONE || dirtyPiece.add_sq == SQ_NONE)
                 return false;
-            if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
-                return false;
-            if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
-                return false;
+            ok = fused_h1_update_castling_exact(
+              impl, prev.h1Pre, fromRow, h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.to),
+              h1_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq),
+              h1_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq), stmSign, next.h1Pre,
+              next.h1Clip);
         }
         else
         {
+            const std::int16_t* toRow = nullptr;
+            if (dirtyPiece.to != SQ_NONE)
+                toRow = h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.to);
+            else if (dirtyPiece.add_sq != SQ_NONE)
+                toRow = h1_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq);
+            else
+                return false;
+
             if (capture)
             {
-                if (!apply_piece_toggle(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq, -1, next.h1Pre))
-                    return false;
+                ok = fused_h1_update_capture_exact(impl, prev.h1Pre, fromRow, toRow,
+                                                   h1_piece_row(impl, dirtyPiece.remove_pc,
+                                                                dirtyPiece.remove_sq),
+                                                   stmSign, next.h1Pre, next.h1Clip);
             }
-            if (dirtyPiece.add_sq != SQ_NONE)
+            else
             {
-                if (!apply_piece_toggle(impl, dirtyPiece.add_pc, dirtyPiece.add_sq, +1, next.h1Pre))
-                    return false;
+                ok = fused_h1_update_quiet_exact(impl, prev.h1Pre, fromRow, toRow, stmSign,
+                                                 next.h1Pre, next.h1Clip);
             }
         }
-
-        if (!apply_stm_toggle(nextStmBlack))
+        if (!ok)
             return false;
     }
 
     next.pieceCount = prev.pieceCount - (capture ? 1 : 0);
+    next.stmBlack   = nextStmBlack;
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key = nextKey;
-    refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
 }
@@ -2016,24 +2145,20 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
     next.bucket8    = prev.bucket8;
     next.stmBlack   = prev.stmBlack;
     next.bucket16   = prev.bucket16;
-    next.h1Pre      = prev.h1Pre;
+    const int stmSign = nextStmBlack == prev.stmBlack ? 0 : (nextStmBlack ? +1 : -1);
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     if (metrics)
         ++metrics->advanceNullPreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
-        if (nextStmBlack != next.stmBlack)
-        {
-            const int sign = nextStmBlack ? +1 : -1;
-            apply_h1_feature_delta(impl, 736, sign, next.h1Pre);
-            next.stmBlack = nextStmBlack;
-        }
+        if (!fused_h1_update_null_exact(impl, prev.h1Pre, stmSign, next.h1Pre, next.h1Clip))
+            return false;
     }
 
+    next.stmBlack = nextStmBlack;
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key = nextKey;
-    refresh_h1_clip(impl, next.h1Pre, next.h1Clip);
     next.valid = true;
     return true;
 }
