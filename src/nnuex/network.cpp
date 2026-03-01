@@ -1088,7 +1088,6 @@ struct BucketLayers {
 };
 
 struct EncodedFen {
-    std::array<float, kExpectedInputSize> features{};
     std::array<std::uint16_t, kMaxActiveFeatures> activeFeatureIndices{};
     std::uint16_t                                 activeFeatureCount = 0;
     int                                           pieceCount         = 0;
@@ -1372,7 +1371,6 @@ std::optional<Evaluation> Network::evaluate(const IncrementalState& state) const
 }
 
 bool Network::build_incremental_state(const Position& pos, IncrementalState& out) const {
-    out = IncrementalState{};
     if (!initialized_ || impl_ == nullptr)
         return false;
 
@@ -1388,7 +1386,6 @@ bool Network::advance_incremental_state_from_meta(Move                   move,
                                                   Key                    nextKey,
                                                   int                    nextStmBlack,
                                                   IncrementalState&      next) const {
-    next = IncrementalState{};
     if (!initialized_ || impl_ == nullptr || !prev.valid)
         return false;
     return advance_incremental_state_from_meta_impl(*impl_, move, dirtyPiece, prev, nextKey,
@@ -1408,7 +1405,6 @@ bool Network::advance_incremental_state_null_from_meta(const IncrementalState& p
                                                        Key                    nextKey,
                                                        int                    nextStmBlack,
                                                        IncrementalState&      next) const {
-    next = IncrementalState{};
     if (!initialized_ || impl_ == nullptr || !prev.valid)
         return false;
     return advance_incremental_state_null_from_meta_impl(*impl_, prev, nextKey, nextStmBlack,
@@ -1613,8 +1609,6 @@ void fill_bucket_fields(int pieceCount, int stmBlack, int& bucket8, int& bucket1
 bool add_active_feature(EncodedFen& enc, int featureIndex) {
     if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
         return false;
-
-    enc.features[std::size_t(featureIndex)] = 1.0f;
     if (enc.activeFeatureCount >= enc.activeFeatureIndices.size())
         return false;
 
@@ -1837,10 +1831,11 @@ std::optional<Evaluation> evaluate_from_h1_clipped(const Network::Impl& impl,
     const std::int32_t weightScaleHidden  = impl.weightScaleHidden;
     const std::int64_t outScale           = impl.outputScale;
 
-    std::array<std::uint8_t, kExpectedPsqtH2> psqtH2{};
-    std::array<std::uint8_t, kExpectedPsqtH3> psqtH3{};
-    std::array<std::uint8_t, kExpectedPosH2>  posH2{};
-    std::array<std::uint8_t, kExpectedPosH3>  posH3{};
+    // These scratch buffers are fully overwritten by the fixed-shape kernels.
+    std::array<std::uint8_t, kExpectedPsqtH2> psqtH2;
+    std::array<std::uint8_t, kExpectedPsqtH3> psqtH3;
+    std::array<std::uint8_t, kExpectedPosH2>  posH2;
+    std::array<std::uint8_t, kExpectedPosH3>  posH3;
 
     const auto& psqtB = impl.psqtBuckets[std::size_t(state.bucket16)];
     const auto& posB  = impl.positionalBuckets[std::size_t(state.bucket16)];

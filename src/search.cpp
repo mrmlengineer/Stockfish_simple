@@ -516,8 +516,6 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         auto&       next = nnuexAccumulatorStack[idx];
         bool        ok   = false;
 
-        next.state = NNUEX::IncrementalState{};
-
         if (next.isNull)
         {
             if (metricsEnabled)
