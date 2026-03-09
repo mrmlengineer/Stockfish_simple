@@ -100,18 +100,10 @@ class Network {
                                                                   Key                   nextKey,
                                                                   int                   nextStmBlack,
                                                                   IncrementalState&     next) const;
-    bool                      advance_incremental_state(const Position&       posAfterMove,
-                                                        Move                  move,
-                                                        const DirtyPiece&     dirtyPiece,
-                                                        const IncrementalState& prev,
-                                                        IncrementalState&     next) const;
     bool                      advance_incremental_state_null_from_meta(const IncrementalState& prev,
                                                                        Key                   nextKey,
                                                                        int                   nextStmBlack,
                                                                        IncrementalState&     next) const;
-    bool                      advance_incremental_state_null(const Position&        posAfterNull,
-                                                             const IncrementalState& prev,
-                                                             IncrementalState&      next) const;
 
    private:
     std::string resolve_evalfile_path(const std::string& rootDirectory,

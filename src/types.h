@@ -291,7 +291,8 @@ struct DirtyPiece {
     Piece  remove_pc, add_pc;
 };
 
-// Keep track of what threats change on the board (used by NNUE)
+// Keep track of inherited engine-core threat deltas. The active NNUEX runtime
+// does not consume threat features, but Position still populates this data.
 struct DirtyThreat {
     static constexpr int PcSqOffset         = 0;
     static constexpr int ThreatenedSqOffset = 8;
@@ -317,11 +318,10 @@ struct DirtyThreat {
     uint32_t data;
 };
 
-// A piece can be involved in at most 8 outgoing attacks and 16 incoming attacks.
-// Moving a piece also can reveal at most 8 discovered attacks.
-// This implies that a non-castling move can change at most (8 + 16) * 3 + 8 = 80 features.
-// By similar logic, a castling move can change at most (5 + 1 + 3 + 9) * 2 = 36 features.
-// Thus, 80 should work as an upper bound. Finally, 16 entries are added to accommodate
+// In the inherited threat-delta encoding, a piece can be involved in at most
+// 8 outgoing attacks and 16 incoming attacks. Moving a piece also can reveal
+// at most 8 discovered attacks. This makes 80 a safe upper bound for a
+// non-castling move and 36 for castling. The extra 16 entries accommodate
 // unmasked vector stores near the end of the list.
 
 using DirtyThreatList = ValueList<DirtyThreat, 96>;

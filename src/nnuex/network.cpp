@@ -1392,15 +1392,6 @@ bool Network::advance_incremental_state_from_meta(Move                   move,
                                                     nextStmBlack, next);
 }
 
-bool Network::advance_incremental_state(const Position&        posAfterMove,
-                                        Move                   move,
-                                        const DirtyPiece&      dirtyPiece,
-                                        const IncrementalState& prev,
-                                        IncrementalState&      next) const {
-    return advance_incremental_state_from_meta(move, dirtyPiece, prev, posAfterMove.key(),
-                                               posAfterMove.side_to_move() == BLACK ? 1 : 0, next);
-}
-
 bool Network::advance_incremental_state_null_from_meta(const IncrementalState& prev,
                                                        Key                    nextKey,
                                                        int                    nextStmBlack,
@@ -1409,14 +1400,6 @@ bool Network::advance_incremental_state_null_from_meta(const IncrementalState& p
         return false;
     return advance_incremental_state_null_from_meta_impl(*impl_, prev, nextKey, nextStmBlack,
                                                          next);
-}
-
-bool Network::advance_incremental_state_null(const Position&        posAfterNull,
-                                             const IncrementalState& prev,
-                                             IncrementalState&      next) const {
-    return advance_incremental_state_null_from_meta(prev, posAfterNull.key(),
-                                                    posAfterNull.side_to_move() == BLACK ? 1 : 0,
-                                                    next);
 }
 
 namespace {

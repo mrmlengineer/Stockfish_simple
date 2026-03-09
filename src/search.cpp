@@ -29,6 +29,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <list>
+#include <new>
 #include <ratio>
 #include <sstream>
 #include <string>
@@ -1065,8 +1066,9 @@ void Search::Worker::do_move(
     // Preferable over fetch_add to avoid locking instructions
     nodes.store(nodes.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 
-    auto [dirtyPiece, dirtyThreats] = nnuexDiffs.push();
-    pos.do_move(move, st, givesCheck, dirtyPiece, dirtyThreats, &tt, &sharedHistory);
+    DirtyPiece& dirtyPiece = nnuexDiffs.push();
+    new (&nnuexScratchThreats) DirtyThreats;
+    pos.do_move(move, st, givesCheck, dirtyPiece, nnuexScratchThreats, &tt, &sharedHistory);
     push_nnuex_incremental_move(pos, move, dirtyPiece);
 
     if (ss != nullptr)
