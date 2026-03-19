@@ -2071,9 +2071,10 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
     if (!prev.valid)
         return false;
 
-    next         = prev;
-    next.valid   = false;
-    next.key     = prev.key;
+    // Intentionally avoid `next = prev`: the hot-path cost of copying the whole
+    // incremental state is measurable. Any new persistent IncrementalState
+    // fields must be reviewed here to ensure they are explicitly rebuilt/copied.
+    next.valid = false;
 
     if (dirtyPiece.pc == NO_PIECE || dirtyPiece.from == SQ_NONE)
         return false;
@@ -2178,8 +2179,12 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
     if (!prev.valid)
         return false;
 
-    next       = prev;
-    next.valid = false;
+    // Intentionally avoid `next = prev`: null moves only preserve the fields
+    // that remain unchanged. Any new persistent IncrementalState fields must be
+    // reviewed here before they can safely skip the full copy.
+    next.valid         = false;
+    next.pieceCount    = prev.pieceCount;
+    next.psqtBucketAcc = prev.psqtBucketAcc;
 
     const int stmSign = nextStmBlack == prev.stmBlack ? 0 : (nextStmBlack ? +1 : -1);
     const auto* stmRowPos = positional_h1_feature_row(impl, 736);
