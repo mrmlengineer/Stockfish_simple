@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -112,20 +113,6 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
 }
 
 #if NNUEX_HAS_AVX2_INTRINSICS
-
-// High 32 bits of 8-wide unsigned 32×32→64 multiply (no single AVX2 instruction).
-inline __m256i mulhi_epu32_avx2(__m256i a, __m256i b) {
-    const __m256i a_odd    = _mm256_shuffle_epi32(a, _MM_SHUFFLE(3, 3, 1, 1));
-    const __m256i b_odd    = _mm256_shuffle_epi32(b, _MM_SHUFFLE(3, 3, 1, 1));
-    const __m256i prod_even = _mm256_mul_epu32(a, b);        // lanes 0,2,4,6 → 64-bit
-    const __m256i prod_odd  = _mm256_mul_epu32(a_odd, b_odd);
-    // Even results: high 32 bits sit in odd positions after >>32
-    const __m256i hi_even  = _mm256_srli_epi64(prod_even, 32);
-    // Odd results: high 32 bits are already in the odd positions of each 64-bit lane
-    const __m256i hi_odd   = _mm256_and_si256(prod_odd, _mm256_set1_epi64x(
-                               std::int64_t(0xFFFFFFFF00000000ULL)));
-    return _mm256_or_si256(hi_even, hi_odd);
-}
 
 void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
                                         std::size_t         count,
@@ -469,12 +456,92 @@ bool try_parse_engine_value_output_scale_from_metadata(std::string_view metadata
     return true;
 }
 
+bool try_round_positive_i32_scale(float value, std::int32_t maxValue, std::int32_t& out);
+
+bool parse_json_number_after_colon(std::string_view s, std::size_t colonPos, double& out) {
+    std::size_t i = colonPos + 1;
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+        ++i;
+    if (i >= s.size())
+        return false;
+
+    const std::size_t start = i;
+    if (s[i] == '+' || s[i] == '-')
+        ++i;
+
+    bool hasDigit = false;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+    {
+        hasDigit = true;
+        ++i;
+    }
+    if (i < s.size() && s[i] == '.')
+    {
+        ++i;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+        {
+            hasDigit = true;
+            ++i;
+        }
+    }
+    if (!hasDigit)
+        return false;
+
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E'))
+    {
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-'))
+            ++i;
+
+        bool hasExpDigit = false;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+        {
+            hasExpDigit = true;
+            ++i;
+        }
+        if (!hasExpDigit)
+            return false;
+    }
+
+    const std::string token(s.substr(start, i - start));
+    char*             endPtr = nullptr;
+    const double      parsed = std::strtod(token.c_str(), &endPtr);
+    if (endPtr != token.c_str() + token.size() || !std::isfinite(parsed))
+        return false;
+    out = parsed;
+    return true;
+}
+
+bool try_parse_positive_i32_scale_from_metadata(std::string_view metadataJson,
+                                                std::string_view key,
+                                                std::int32_t     maxValue,
+                                                std::int32_t&    outScale) {
+    const std::size_t keyPos = metadataJson.find(key);
+    if (keyPos == std::string_view::npos)
+        return false;
+
+    const std::size_t colonPos = metadataJson.find(':', keyPos + key.size());
+    if (colonPos == std::string_view::npos)
+        return false;
+
+    double parsed = 0.0;
+    if (!parse_json_number_after_colon(metadataJson, colonPos, parsed))
+        return false;
+
+    return try_round_positive_i32_scale(static_cast<float>(parsed), maxValue, outScale);
+}
+
 struct Header;
 
 bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t>& fileBytes,
                                                   const Header&                    h,
                                                   int&                             outScale,
                                                   std::string&                     err);
+bool load_branch_ft_quantized_ones_from_metadata(const std::vector<std::uint8_t>& fileBytes,
+                                                 const Header&                    h,
+                                                 std::int32_t&                    outPsqtFtQuantizedOne,
+                                                 std::int32_t&                    outPositionalFtQuantizedOne,
+                                                 std::string&                     err);
 
 struct Header {
     std::array<char, 8> magic{};
@@ -629,16 +696,19 @@ bool validate_supported_architecture(const Header& h, std::string& err) {
 }
 
 bool cache_validated_runtime_scaling(const Header& h,
-                                     std::int32_t& ftQuantizedOne,
                                      std::int32_t& hiddenQuantizedOne,
                                      std::int32_t& weightScaleHidden,
                                      std::int64_t& outputScale,
                                      std::string&  err) {
-    if (!try_round_positive_i32_scale(h.ftQuantizedOne, std::numeric_limits<std::int32_t>::max(),
-                                      ftQuantizedOne))
+    // Header ftQuantizedOne is validated for format correctness but not used at runtime;
+    // actual per-branch FT scales come from metadata (PSQT_FT_QUANTIZED_ONE, POSITIONAL_FT_QUANTIZED_ONE).
     {
-        err = "NNUEX header contains invalid ftQuantizedOne";
-        return false;
+        std::int32_t hdrFtQ = 0;
+        if (!try_round_positive_i32_scale(h.ftQuantizedOne, std::numeric_limits<std::int32_t>::max(), hdrFtQ))
+        {
+            err = "NNUEX header contains invalid ftQuantizedOne";
+            return false;
+        }
     }
     if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, 255, hiddenQuantizedOne))
     {
@@ -681,6 +751,49 @@ bool load_engine_value_output_scale_from_metadata(const std::vector<std::uint8_t
     int parsedScale = 0;
     if (try_parse_engine_value_output_scale_from_metadata(metadataJson, parsedScale))
         outScale = parsedScale;
+    return true;
+}
+
+bool load_branch_ft_quantized_ones_from_metadata(const std::vector<std::uint8_t>& fileBytes,
+                                                 const Header&                    h,
+                                                 std::int32_t&                    outPsqtFtQuantizedOne,
+                                                 std::int32_t&                    outPositionalFtQuantizedOne,
+                                                 std::string&                     err) {
+    if ((h.flags & 1u) == 0 || h.metadataJsonBytes == 0)
+    {
+        err = "NNUEX metadata JSON required but not present (need PSQT_FT_QUANTIZED_ONE and POSITIONAL_FT_QUANTIZED_ONE)";
+        return false;
+    }
+
+    std::size_t payloadOffset = 0;
+    std::size_t payloadBytes  = 0;
+    std::size_t metaOffset    = 0;
+    std::size_t metaBytes     = 0;
+    if (!compute_nnuex_layout(h, fileBytes.size(), payloadOffset, payloadBytes, metaOffset, metaBytes, err))
+        return false;
+
+    const auto* data = reinterpret_cast<const char*>(fileBytes.data() + metaOffset);
+    std::string_view metadataJson(data, metaBytes);
+
+    std::int32_t parsedScale = 0;
+    if (!try_parse_positive_i32_scale_from_metadata(
+          metadataJson, "\"PSQT_FT_QUANTIZED_ONE\"", std::numeric_limits<std::int32_t>::max(),
+          parsedScale))
+    {
+        err = "NNUEX metadata missing or invalid PSQT_FT_QUANTIZED_ONE";
+        return false;
+    }
+    outPsqtFtQuantizedOne = parsedScale;
+
+    if (!try_parse_positive_i32_scale_from_metadata(
+          metadataJson, "\"POSITIONAL_FT_QUANTIZED_ONE\"", std::numeric_limits<std::int32_t>::max(),
+          parsedScale))
+    {
+        err = "NNUEX metadata missing or invalid POSITIONAL_FT_QUANTIZED_ONE";
+        return false;
+    }
+    outPositionalFtQuantizedOne = parsedScale;
+
     return true;
 }
 
@@ -1168,7 +1281,7 @@ bool encode_position_v2(const Position& pos, EncodedFen& out);
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
 bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                                           const EncodedFen&    enc,
-                                          std::array<std::int32_t, kExpectedH1Pos>* outH1Pre,
+                                          std::array<std::int16_t, kExpectedH1Pos>* outH1Pre,
                                           std::array<std::uint8_t, kExpectedH1Pos>& outH1Clip);
 std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl, const EncodedFen& enc);
 std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc);
@@ -1193,46 +1306,26 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 
 }  // namespace
 
-// Magic number for exact unsigned integer division: floor(n / d) = mulhi(n, magic) >> shift
-// for all n in [0, n_max].  Precomputed at model load time.
-struct MagicDiv32 {
-    std::uint32_t magic = 0;
-    int           shift = 0;
-    bool          valid = false;
-};
-
-static MagicDiv32 compute_clip_division_magic(std::uint32_t d, std::uint32_t n_max) {
-    if (d == 0)
-        return {};
-    if (d == 1)
-        return {1u, 0, true};
-
-    const std::uint64_t k_max = std::uint64_t(n_max) / d;
-
-    for (int s = 0; s < 32; ++s)
-    {
-        const std::uint64_t pow2 = std::uint64_t(1) << (32 + s);
-        const std::uint64_t M    = (pow2 + d - 1) / d;  // ceil(2^(32+s) / d)
-        if (M > 0xFFFFFFFFu)
-            continue;
-
-        const std::uint64_t r = M * d - pow2;  // remainder, 0 <= r < d
-        // Exactness condition: k_max * r + (d - 1) * M < pow2
-        if (k_max <= (pow2 - std::uint64_t(d - 1) * M) / (r ? r : 1) && (r == 0 || k_max * r + std::uint64_t(d - 1) * M < pow2))
-            return {std::uint32_t(M), s, true};
-    }
-    return {};
+// Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
+static int log2_power_of_two(std::int32_t x) {
+    if (x <= 0 || (x & (x - 1)) != 0)
+        return 0;
+    int s = 0;
+    while ((1 << s) < x)
+        ++s;
+    return s;
 }
 
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
     int    engineValueOutputScale = kDefaultEngineValueOutputScale;
-    std::int32_t ftQuantizedOne    = 0;
-    std::int32_t hiddenQuantizedOne = 0;
-    std::int32_t weightScaleHidden  = 0;
-    std::int64_t outputScale        = 0;
-    MagicDiv32   clipMagic;
+    std::int32_t psqtFtQuantizedOne       = 0;  // from metadata PSQT_FT_QUANTIZED_ONE
+    std::int32_t positionalFtQuantizedOne = 0;  // from metadata POSITIONAL_FT_QUANTIZED_ONE
+    std::int32_t hiddenQuantizedOne       = 0;
+    std::int32_t weightScaleHidden        = 0;
+    std::int64_t outputScale              = 0;
+    int          positionalFtShift        = 0;  // log2(positionalFtQuantizedOne) when power-of-two, else 0
 
     std::array<BucketLayers<kExpectedH1Pos, kExpectedPosH2, kExpectedPosH3>, kExpectedBucketCount>
       positionalBuckets{};
@@ -1335,27 +1428,18 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
     auto newImpl = std::make_unique<Impl>();
     if (!parse_header(bytes, newImpl->header, err))
         return false;
-    if (!cache_validated_runtime_scaling(newImpl->header, newImpl->ftQuantizedOne,
+    if (!cache_validated_runtime_scaling(newImpl->header,
                                          newImpl->hiddenQuantizedOne, newImpl->weightScaleHidden,
                                          newImpl->outputScale, err))
         return false;
-
-    // Precompute magic number for the exact integer clip/quantize division.
-    // n_max = max_pre_activation * hiddenQuantizedOne + ftQuantizedOne/2
-    // Conservative bound: 34 active features × 32767 max i16 weight ≈ 1.1M pre-activation.
-    if (newImpl->ftQuantizedOne > 0 && newImpl->hiddenQuantizedOne > 0)
-    {
-        const std::uint32_t maxPreAct =
-          std::uint32_t(kMaxActiveFeatures + 1) * 32767u;  // bias + features
-        const std::uint32_t n_max =
-          maxPreAct * std::uint32_t(newImpl->hiddenQuantizedOne)
-          + std::uint32_t(newImpl->ftQuantizedOne / 2);
-        newImpl->clipMagic =
-          compute_clip_division_magic(std::uint32_t(newImpl->ftQuantizedOne), n_max);
-    }
-
     if (!verify_file_checksums(bytes, newImpl->header, err))
         return false;
+    if (!load_branch_ft_quantized_ones_from_metadata(
+          bytes, newImpl->header, newImpl->psqtFtQuantizedOne, newImpl->positionalFtQuantizedOne, err))
+        return false;
+
+    // Precompute shift for power-of-two positional FT scale (used for integer clip/quantize).
+    newImpl->positionalFtShift = log2_power_of_two(newImpl->positionalFtQuantizedOne);
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1422,7 +1506,11 @@ void Network::verify(std::string evalfilePath,
        << " buckets=" << h.bucketCount << " h1=" << h.hidden1Total << " (" << h.hidden1Psqt << "+"
        << h.hidden1Positional << ")"
        << " | outputs=" << h.outputs << " | label_scales=" << h.labelScalePsqt << ","
-       << h.labelScalePositional << " | engine_output_scale=" << impl_->engineValueOutputScale;
+       << h.labelScalePositional
+       << " | PSQT_FT_Q=" << impl_->psqtFtQuantizedOne
+       << " POS_FT_Q=" << impl_->positionalFtQuantizedOne
+       << " (shift=" << impl_->positionalFtShift << ")"
+       << " | engine_output_scale=" << impl_->engineValueOutputScale;
     if (impl_->metadataJsonPresent)
         ss << " | metadata-json";
     ss << " | checksum=ok(payload";
@@ -1812,13 +1900,13 @@ const std::int16_t* psqt_bucket_piece_row(const Network::Impl& impl, Piece pc, S
 
 template<std::size_t RowCount>
 bool fused_positional_h1_update_rows_exact(
-  const std::array<std::int32_t, kExpectedH1Pos>& prevH1Pre,
+  const std::array<std::int16_t, kExpectedH1Pos>& prevH1Pre,
   const std::array<const std::int16_t*, RowCount>& rows,
   const std::array<int, RowCount>& signs,
   std::int32_t ftQuantizedOne,
   std::int32_t hiddenQuantizedOne,
-  const MagicDiv32& clipMagic,
-  std::array<std::int32_t, kExpectedH1Pos>& nextH1Pre,
+  int ftShift,
+  std::array<std::int16_t, kExpectedH1Pos>& nextH1Pre,
   std::array<std::uint8_t, kExpectedH1Pos>& nextH1Clip) {
     for (const auto* row : rows)
         if (!row)
@@ -1827,20 +1915,19 @@ bool fused_positional_h1_update_rows_exact(
 #if NNUEX_HAS_AVX2_INTRINSICS
     if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
     {
-        const __m256i zero32 = _mm256_setzero_si256();
+        const __m256i zero16    = _mm256_setzero_si256();
+        const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
+        const __m256i half32    = _mm256_set1_epi32(ftQuantizedOne / 2);
 
-        if (clipMagic.valid)
+        if (ftShift > 0)
         {
-            // Integer-only clip/quantize path using precomputed magic division.
-            const __m256i hiddenQVec = _mm256_set1_epi32(hiddenQuantizedOne);
-            const __m256i halfVec    = _mm256_set1_epi32(ftQuantizedOne / 2);
-            const __m256i magicVec   = _mm256_set1_epi32(std::int32_t(clipMagic.magic));
-            const int     extraShift = clipMagic.shift;
+            // i16 accumulation (16 lanes) + power-of-2 shift clip/quantize.
+            const __m128i shift128 = _mm_cvtsi32_si128(ftShift);
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
             {
-                __m256i acc =
-                  _mm256_loadu_si256(reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
+                __m256i acc = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
 
                 for (std::size_t i = 0; i < RowCount; ++i)
                 {
@@ -1848,44 +1935,53 @@ bool fused_positional_h1_update_rows_exact(
                     if (!sign)
                         continue;
 
-                    const __m128i row16 =
-                      _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
-                    const __m256i row32 = _mm256_cvtepi16_epi32(row16);
-                    acc                 = sign > 0 ? _mm256_add_epi32(acc, row32)
-                                                   : _mm256_sub_epi32(acc, row32);
+                    const __m256i row = _mm256_loadu_si256(
+                      reinterpret_cast<const __m256i*>(rows[i] + j));
+                    acc = sign > 0 ? _mm256_add_epi16(acc, row)
+                                   : _mm256_sub_epi16(acc, row);
                 }
 
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
 
-                // ReLU → integer clip/quantize → pack to u8
-                const __m256i xPos = _mm256_max_epi32(acc, zero32);
-                const __m256i num  = _mm256_add_epi32(
-                  _mm256_mullo_epi32(xPos, hiddenQVec), halfVec);
-                __m256i q32 = mulhi_epu32_avx2(num, magicVec);
-                if (extraShift > 0)
-                    q32 = _mm256_srli_epi32(q32, extraShift);
-                q32 = _mm256_min_epu32(q32, hiddenQVec);
+                // ReLU in i16
+                const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
 
-                const __m128i qLo = _mm256_castsi256_si128(q32);
-                const __m128i qHi = _mm256_extracti128_si256(q32, 1);
-                const __m128i q16 = _mm_packus_epi32(qLo, qHi);
-                const __m128i q8  = _mm_packus_epi16(q16, q16);
-                _mm_storel_epi64(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), q8);
+                // Widen to i32 for multiply (overflow: max ~963 * 127 = 122K > i16)
+                const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
+                const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
+                const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
+                const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+
+                // (acc * hiddenQ + half) >> ftShift, clamped to [0, hiddenQ]
+                __m256i qLo = _mm256_srl_epi32(
+                  _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
+                qLo = _mm256_min_epu32(qLo, hiddenQ32);
+                __m256i qHi = _mm256_srl_epi32(
+                  _mm256_add_epi32(_mm256_mullo_epi32(xHi32, hiddenQ32), half32), shift128);
+                qHi = _mm256_min_epu32(qHi, hiddenQ32);
+
+                // Pack i32 → i16 → u8 (16 values → 16 bytes)
+                const __m128i pLo16 = _mm_packus_epi32(
+                  _mm256_castsi256_si128(qLo), _mm256_extracti128_si256(qLo, 1));
+                const __m128i pHi16 = _mm_packus_epi32(
+                  _mm256_castsi256_si128(qHi), _mm256_extracti128_si256(qHi, 1));
+                const __m128i p8 = _mm_packus_epi16(pLo16, pHi16);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), p8);
             }
 
             return true;
         }
 
-        // Fallback: f64 division path (when magic number is not available).
+        // Fallback: i16 accumulation + f64 division clip path.
         const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
         const __m256d hiddenQ0d = _mm256_setzero_pd();
         const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
         const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
 
-        for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+        for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
         {
-            __m256i acc =
-              _mm256_loadu_si256(reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
+            __m256i acc = _mm256_loadu_si256(
+              reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
 
             for (std::size_t i = 0; i < RowCount; ++i)
             {
@@ -1893,33 +1989,48 @@ bool fused_positional_h1_update_rows_exact(
                 if (!sign)
                     continue;
 
-                const __m128i row16 =
-                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
-                const __m256i row32 = _mm256_cvtepi16_epi32(row16);
-                acc                 = sign > 0 ? _mm256_add_epi32(acc, row32)
-                                               : _mm256_sub_epi32(acc, row32);
+                const __m256i row = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(rows[i] + j));
+                acc = sign > 0 ? _mm256_add_epi16(acc, row)
+                               : _mm256_sub_epi16(acc, row);
             }
 
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
 
-            const __m256i xPos32 = _mm256_max_epi32(acc, zero32);
-            const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
-            const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+            const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
+            const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
+            const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
 
-            __m256d qLo = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
-            __m256d qHi = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
+            // Process low 8 values (4+4 via f64)
+            const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
+            const __m128i xLo32Lo = _mm256_castsi256_si128(xLo32);
+            const __m128i xLo32Hi = _mm256_extracti128_si256(xLo32, 1);
+            __m256d dA = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Lo), hiddenQd), halfD), denomD);
+            __m256d dB = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Hi), hiddenQd), halfD), denomD);
+            dA = _mm256_min_pd(_mm256_max_pd(dA, hiddenQ0d), hiddenQd);
+            dB = _mm256_min_pd(_mm256_max_pd(dB, hiddenQ0d), hiddenQd);
+            const __m128i rLoA = _mm256_cvttpd_epi32(dA);
+            const __m128i rLoB = _mm256_cvttpd_epi32(dB);
+            const __m128i rLo16 = _mm_packus_epi32(rLoA, rLoB);
 
-            qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
-            qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
+            // Process high 8 values
+            const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+            const __m128i xHi32Lo = _mm256_castsi256_si128(xHi32);
+            const __m128i xHi32Hi = _mm256_extracti128_si256(xHi32, 1);
+            __m256d dC = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Lo), hiddenQd), halfD), denomD);
+            __m256d dD = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Hi), hiddenQd), halfD), denomD);
+            dC = _mm256_min_pd(_mm256_max_pd(dC, hiddenQ0d), hiddenQd);
+            dD = _mm256_min_pd(_mm256_max_pd(dD, hiddenQ0d), hiddenQd);
+            const __m128i rHiA = _mm256_cvttpd_epi32(dC);
+            const __m128i rHiB = _mm256_cvttpd_epi32(dD);
+            const __m128i rHi16 = _mm_packus_epi32(rHiA, rHiB);
 
-            const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
-            const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
-            const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
-            const __m128i q8    = _mm_packus_epi16(q16, q16);
-
-            _mm_storel_epi64(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), q8);
+            const __m128i p8 = _mm_packus_epi16(rLo16, rHi16);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), p8);
         }
 
         return true;
@@ -1928,13 +2039,14 @@ bool fused_positional_h1_update_rows_exact(
 
     for (std::size_t j = 0; j < kExpectedH1Pos; ++j)
     {
-        std::int32_t acc = prevH1Pre[j];
+        std::int16_t acc = prevH1Pre[j];
         for (std::size_t i = 0; i < RowCount; ++i)
-            acc += signs[i] * std::int32_t(rows[i][j]);
+            acc += std::int16_t(signs[i] * std::int16_t(rows[i][j]));
 
         nextH1Pre[j] = acc;
+        const std::int32_t pos = std::max(std::int32_t(acc), 0);
         const std::int64_t scaled =
-          round_div_symmetric_i64(std::int64_t(acc) * hiddenQuantizedOne, ftQuantizedOne);
+          round_div_symmetric_i64(std::int64_t(pos) * hiddenQuantizedOne, ftQuantizedOne);
         nextH1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
     }
 
@@ -1963,7 +2075,7 @@ bool fused_psqt_bucket_update_rows_exact(
 
 bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                                           const EncodedFen&    enc,
-                                          std::array<std::int32_t, kExpectedH1Pos>* outH1Pre,
+                                          std::array<std::int16_t, kExpectedH1Pos>* outH1Pre,
                                           std::array<std::uint8_t, kExpectedH1Pos>& outH1Clip) {
     if (enc.activeFeatureCount > enc.activeFeatureIndices.size())
         return false;
@@ -1973,7 +2085,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
         return false;
     }
 
-    const std::int32_t ftQuantizedOne     = impl.ftQuantizedOne;
+    const std::int32_t ftQuantizedOne     = impl.positionalFtQuantizedOne;
     const std::int32_t hiddenQuantizedOne = impl.hiddenQuantizedOne;
     if (ftQuantizedOne <= 0 || hiddenQuantizedOne <= 0)
         return false;
@@ -1990,89 +2102,112 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
 #if NNUEX_HAS_AVX2_INTRINSICS
     if (hiddenQuantizedOne <= 255)
     {
-        const __m256i zero32 = _mm256_setzero_si256();
+        const __m256i zero16    = _mm256_setzero_si256();
+        const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
+        const __m256i half32    = _mm256_set1_epi32(ftQuantizedOne / 2);
 
-        if (impl.clipMagic.valid)
+        if (impl.positionalFtShift > 0)
         {
-            const __m256i hiddenQVec = _mm256_set1_epi32(hiddenQuantizedOne);
-            const __m256i halfVec    = _mm256_set1_epi32(ftQuantizedOne / 2);
-            const __m256i magicVec   = _mm256_set1_epi32(std::int32_t(impl.clipMagic.magic));
-            const int     extraShift = impl.clipMagic.shift;
+            // i16 accumulation (16 lanes) + power-of-2 shift clip/quantize.
+            const __m128i shift128 = _mm_cvtsi32_si128(impl.positionalFtShift);
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
             {
-                const __m128i bias16 =
-                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(impl.positionalHidden1Bias.data() + j));
-                __m256i acc = _mm256_cvtepi16_epi32(bias16);
+                // Bias is already i16 — load directly as 16 lanes.
+                __m256i acc = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
 
                 for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
                 {
-                    const __m128i row16 =
-                      _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
-                    acc = _mm256_add_epi32(acc, _mm256_cvtepi16_epi32(row16));
+                    const __m256i row = _mm256_loadu_si256(
+                      reinterpret_cast<const __m256i*>(rows[i] + j));
+                    acc = _mm256_add_epi16(acc, row);
                 }
 
                 if (outH1Pre)
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
 
-                const __m256i xPos = _mm256_max_epi32(acc, zero32);
-                const __m256i num  = _mm256_add_epi32(
-                  _mm256_mullo_epi32(xPos, hiddenQVec), halfVec);
-                __m256i q32 = mulhi_epu32_avx2(num, magicVec);
-                if (extraShift > 0)
-                    q32 = _mm256_srli_epi32(q32, extraShift);
-                q32 = _mm256_min_epu32(q32, hiddenQVec);
+                // ReLU in i16
+                const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
 
-                const __m128i qLo = _mm256_castsi256_si128(q32);
-                const __m128i qHi = _mm256_extracti128_si256(q32, 1);
-                const __m128i q16 = _mm_packus_epi32(qLo, qHi);
-                const __m128i q8  = _mm_packus_epi16(q16, q16);
-                _mm_storel_epi64(reinterpret_cast<__m128i*>(outH1Clip.data() + j), q8);
+                // Widen to i32 for multiply
+                const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
+                const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
+                const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
+                const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+
+                // (acc * hiddenQ + half) >> ftShift, clamped to [0, hiddenQ]
+                __m256i qLo = _mm256_srl_epi32(
+                  _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
+                qLo = _mm256_min_epu32(qLo, hiddenQ32);
+                __m256i qHi = _mm256_srl_epi32(
+                  _mm256_add_epi32(_mm256_mullo_epi32(xHi32, hiddenQ32), half32), shift128);
+                qHi = _mm256_min_epu32(qHi, hiddenQ32);
+
+                const __m128i pLo16 = _mm_packus_epi32(
+                  _mm256_castsi256_si128(qLo), _mm256_extracti128_si256(qLo, 1));
+                const __m128i pHi16 = _mm_packus_epi32(
+                  _mm256_castsi256_si128(qHi), _mm256_extracti128_si256(qHi, 1));
+                const __m128i p8 = _mm_packus_epi16(pLo16, pHi16);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(outH1Clip.data() + j), p8);
             }
 
             return true;
         }
 
-        // Fallback: f64 division path.
+        // Fallback: i16 accumulation + f64 division clip path.
         const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
         const __m256d hiddenQ0d = _mm256_setzero_pd();
         const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
         const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
 
-        for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+        for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
         {
-            const __m128i bias16 =
-              _mm_loadu_si128(reinterpret_cast<const __m128i*>(impl.positionalHidden1Bias.data() + j));
-            __m256i acc = _mm256_cvtepi16_epi32(bias16);
+            __m256i acc = _mm256_loadu_si256(
+              reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
 
             for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
             {
-                const __m128i row16 =
-                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
-                acc = _mm256_add_epi32(acc, _mm256_cvtepi16_epi32(row16));
+                const __m256i row = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(rows[i] + j));
+                acc = _mm256_add_epi16(acc, row);
             }
 
             if (outH1Pre)
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
 
-            const __m256i xPos32 = _mm256_max_epi32(acc, zero32);
-            const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
-            const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
+            const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
+            const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
+            const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
 
-            __m256d qLo = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosLo), hiddenQd), halfD), denomD);
-            __m256d qHi = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xPosHi), hiddenQd), halfD), denomD);
+            const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
+            const __m128i xLo32Lo = _mm256_castsi256_si128(xLo32);
+            const __m128i xLo32Hi = _mm256_extracti128_si256(xLo32, 1);
+            __m256d dA = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Lo), hiddenQd), halfD), denomD);
+            __m256d dB = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Hi), hiddenQd), halfD), denomD);
+            dA = _mm256_min_pd(_mm256_max_pd(dA, hiddenQ0d), hiddenQd);
+            dB = _mm256_min_pd(_mm256_max_pd(dB, hiddenQ0d), hiddenQd);
+            const __m128i rLoA = _mm256_cvttpd_epi32(dA);
+            const __m128i rLoB = _mm256_cvttpd_epi32(dB);
+            const __m128i rLo16 = _mm_packus_epi32(rLoA, rLoB);
 
-            qLo = _mm256_min_pd(_mm256_max_pd(qLo, hiddenQ0d), hiddenQd);
-            qHi = _mm256_min_pd(_mm256_max_pd(qHi, hiddenQ0d), hiddenQd);
+            const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+            const __m128i xHi32Lo = _mm256_castsi256_si128(xHi32);
+            const __m128i xHi32Hi = _mm256_extracti128_si256(xHi32, 1);
+            __m256d dC = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Lo), hiddenQd), halfD), denomD);
+            __m256d dD = _mm256_div_pd(
+              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Hi), hiddenQd), halfD), denomD);
+            dC = _mm256_min_pd(_mm256_max_pd(dC, hiddenQ0d), hiddenQd);
+            dD = _mm256_min_pd(_mm256_max_pd(dD, hiddenQ0d), hiddenQd);
+            const __m128i rHiA = _mm256_cvttpd_epi32(dC);
+            const __m128i rHiB = _mm256_cvttpd_epi32(dD);
+            const __m128i rHi16 = _mm_packus_epi32(rHiA, rHiB);
 
-            const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
-            const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
-            const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
-            const __m128i q8    = _mm_packus_epi16(q16, q16);
-
-            _mm_storel_epi64(reinterpret_cast<__m128i*>(outH1Clip.data() + j), q8);
+            const __m128i p8 = _mm_packus_epi16(rLo16, rHi16);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(outH1Clip.data() + j), p8);
         }
 
         return true;
@@ -2081,14 +2216,15 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
 
     for (std::size_t j = 0; j < kExpectedH1Pos; ++j)
     {
-        std::int32_t acc = impl.positionalHidden1Bias[j];
+        std::int16_t acc = impl.positionalHidden1Bias[j];
         for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-            acc += std::int32_t(rows[i][j]);
+            acc += rows[i][j];
 
         if (outH1Pre)
             (*outH1Pre)[j] = acc;
+        const std::int32_t pos = std::max(std::int32_t(acc), 0);
         const std::int64_t scaled =
-          round_div_symmetric_i64(std::int64_t(acc) * hiddenQuantizedOne, ftQuantizedOne);
+          round_div_symmetric_i64(std::int64_t(pos) * hiddenQuantizedOne, ftQuantizedOne);
         outH1Clip[j] = clip_to_hidden_q(scaled, hiddenQuantizedOne);
     }
 
@@ -2098,7 +2234,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
 std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl, const EncodedFen& enc) {
     const auto& h = impl.header;
     if (enc.bucket16 < 0 || enc.bucket16 >= int(kExpectedBucketCount) || enc.bucket8 < 0
-        || enc.bucket8 >= int(kPieceBucketCount) || impl.ftQuantizedOne <= 0 || impl.outputScale <= 0)
+        || enc.bucket8 >= int(kPieceBucketCount) || impl.psqtFtQuantizedOne <= 0 || impl.outputScale <= 0)
     {
         return std::nullopt;
     }
@@ -2118,23 +2254,23 @@ std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl,
             return std::nullopt;
     }
 
-    std::int64_t psqtSignedQ255 = 0;
-    std::int64_t posOutAccQ     = 0;
+    std::int64_t psqtSignedQFt = 0;
+    std::int64_t posOutAccQ    = 0;
     if (metrics)
         ++metrics->postH1ForwardCalls;
     {
         ScopedRuntimeMetricTimer postH1Timer(metrics ? &metrics->postH1ForwardNs : nullptr);
 
-        std::int64_t psqtUnsignedQ255 = std::int64_t(impl.psqtBucketOutputBias[std::size_t(enc.bucket8)]);
+        std::int64_t psqtUnsignedQFt = std::int64_t(impl.psqtBucketOutputBias[std::size_t(enc.bucket8)]);
         for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
         {
             const std::size_t featureIndex = enc.activeFeatureIndices[i];
             if (featureIndex == 736)
                 continue;
-            psqtUnsignedQ255 +=
+            psqtUnsignedQFt +=
               impl.psqtBucketOutputWeight[featureIndex * kPieceBucketCount + std::size_t(enc.bucket8)];
         }
-        psqtSignedQ255 = enc.stmBlack ? -psqtUnsignedQ255 : psqtUnsignedQ255;
+        psqtSignedQFt = enc.stmBlack ? -psqtUnsignedQFt : psqtUnsignedQFt;
 
         dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(positionalH1Clip.data(), posB.h2Weight.data(),
                                                        posB.h2WeightPacked4.data(), posB.h2Bias.data(),
@@ -2152,11 +2288,11 @@ std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl,
         ++metrics->outputConvertCalls;
     ScopedRuntimeMetricTimer outputConvertTimer(metrics ? &metrics->outputConvertNs : nullptr);
 
-    const float psqtNorm = static_cast<float>(double(psqtSignedQ255) / double(impl.ftQuantizedOne));
+    const float psqtNorm = static_cast<float>(double(psqtSignedQFt) / double(impl.psqtFtQuantizedOne));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(impl.outputScale));
 
     const auto psqtHeadCpRaw = round_half_away_from_zero(
-      double(psqtSignedQ255) * double(h.labelScalePsqt) / double(impl.ftQuantizedOne));
+      double(psqtSignedQFt) * double(h.labelScalePsqt) / double(impl.psqtFtQuantizedOne));
     const auto posHeadCpRaw =
       round_half_away_from_zero(double(posOutAccQ) * double(h.labelScalePositional)
                                 / double(impl.outputScale));
@@ -2269,8 +2405,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
             ok = fused_positional_h1_update_rows_exact<5>(
                    prev.positionalH1Pre,
                    {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow, stmRowPos},
-                   {-1, +1, -1, +1, stmSign}, impl.ftQuantizedOne, impl.hiddenQuantizedOne,
-                   impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
+                   {-1, +1, -1, +1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                   impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
                    prev.psqtBucketAcc, {fromPsqtRow, kingToPsqtRow, rookFromPsqtRow, rookToPsqtRow},
                    {-1, +1, -1, +1}, next.psqtBucketAcc);
@@ -2298,8 +2434,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                   psqt_bucket_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
                 ok = fused_positional_h1_update_rows_exact<4>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow, stmRowPos},
-                       {-1, +1, -1, stmSign}, impl.ftQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
+                       {-1, +1, -1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                       impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<3>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow, capturePsqtRow}, {-1, +1, -1},
                        next.psqtBucketAcc);
@@ -2308,8 +2444,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
             {
                 ok = fused_positional_h1_update_rows_exact<3>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, stmRowPos}, {-1, +1, stmSign},
-                       impl.ftQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
+                       impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                       impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<2>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow}, {-1, +1}, next.psqtBucketAcc);
             }
@@ -2352,8 +2488,8 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
         if (!fused_positional_h1_update_rows_exact<1>(
-              prev.positionalH1Pre, {stmRowPos}, {stmSign}, impl.ftQuantizedOne,
-              impl.hiddenQuantizedOne, impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip))
+              prev.positionalH1Pre, {stmRowPos}, {stmSign}, impl.positionalFtQuantizedOne,
+              impl.hiddenQuantizedOne, impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip))
         {
             return false;
         }
@@ -2395,7 +2531,7 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
                                                  impl.positionalOutputBias, impl.hiddenQuantizedOne);
     }
 
-    const std::int64_t psqtSignedQ255 =
+    const std::int64_t psqtSignedQFt =
       state.stmBlack ? -std::int64_t(state.psqtBucketAcc[std::size_t(state.bucket8)])
                      : std::int64_t(state.psqtBucketAcc[std::size_t(state.bucket8)]);
 
@@ -2403,11 +2539,11 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
         ++metrics->outputConvertCalls;
     ScopedRuntimeMetricTimer outputConvertTimer(metrics ? &metrics->outputConvertNs : nullptr);
 
-    const float psqtNorm = static_cast<float>(double(psqtSignedQ255) / double(impl.ftQuantizedOne));
+    const float psqtNorm = static_cast<float>(double(psqtSignedQFt) / double(impl.psqtFtQuantizedOne));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(impl.outputScale));
 
     const auto psqtHeadCpRaw = round_half_away_from_zero(
-      double(psqtSignedQ255) * double(h.labelScalePsqt) / double(impl.ftQuantizedOne));
+      double(psqtSignedQFt) * double(h.labelScalePsqt) / double(impl.psqtFtQuantizedOne));
     const auto posHeadCpRaw =
       round_half_away_from_zero(double(posOutAccQ) * double(h.labelScalePositional)
                                 / double(impl.outputScale));

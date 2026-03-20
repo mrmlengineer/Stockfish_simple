@@ -22,7 +22,7 @@ class Position;
 namespace Stockfish::Eval::NNUEX {
 
 inline constexpr const char* EvalFileDefaultName =
-  "validation/qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_test.nnuex";
+  "export/qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex";
 
 struct Evaluation {
     Value psqt       = VALUE_ZERO;
@@ -45,10 +45,10 @@ struct IncrementalState {
     int bucket16   = 0;
 
     // New-architecture incremental domains:
-    // - positionalH1Pre: q255 pre-activation accumulator for positional_hidden_1
+    // - positionalH1Pre: i16 pre-activation accumulator for positional_hidden_1
     // - positionalH1Clip: q127 clipped activation for positional_hidden_1
-    // - psqtBucketAcc: unsigned q255 direct PSQT accumulator for all 8 piece buckets
-    alignas(64) std::array<std::int32_t, 384> positionalH1Pre{};
+    // - psqtBucketAcc: unsigned direct PSQT accumulator for all 8 piece buckets
+    alignas(64) std::array<std::int16_t, 384> positionalH1Pre{};
     alignas(64) std::array<std::uint8_t, 384> positionalH1Clip{};
     alignas(32) std::array<std::int32_t, 8>   psqtBucketAcc{};
 };
