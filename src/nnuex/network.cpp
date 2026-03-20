@@ -112,6 +112,21 @@ std::uint8_t clip_to_hidden_q(std::int64_t x, std::int32_t hiddenQuantizedOne) {
 }
 
 #if NNUEX_HAS_AVX2_INTRINSICS
+
+// High 32 bits of 8-wide unsigned 32×32→64 multiply (no single AVX2 instruction).
+inline __m256i mulhi_epu32_avx2(__m256i a, __m256i b) {
+    const __m256i a_odd    = _mm256_shuffle_epi32(a, _MM_SHUFFLE(3, 3, 1, 1));
+    const __m256i b_odd    = _mm256_shuffle_epi32(b, _MM_SHUFFLE(3, 3, 1, 1));
+    const __m256i prod_even = _mm256_mul_epu32(a, b);        // lanes 0,2,4,6 → 64-bit
+    const __m256i prod_odd  = _mm256_mul_epu32(a_odd, b_odd);
+    // Even results: high 32 bits sit in odd positions after >>32
+    const __m256i hi_even  = _mm256_srli_epi64(prod_even, 32);
+    // Odd results: high 32 bits are already in the odd positions of each 64-bit lane
+    const __m256i hi_odd   = _mm256_and_si256(prod_odd, _mm256_set1_epi64x(
+                               std::int64_t(0xFFFFFFFF00000000ULL)));
+    return _mm256_or_si256(hi_even, hi_odd);
+}
+
 void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
                                         std::size_t         count,
                                         std::int32_t        denom,
@@ -1178,6 +1193,37 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 
 }  // namespace
 
+// Magic number for exact unsigned integer division: floor(n / d) = mulhi(n, magic) >> shift
+// for all n in [0, n_max].  Precomputed at model load time.
+struct MagicDiv32 {
+    std::uint32_t magic = 0;
+    int           shift = 0;
+    bool          valid = false;
+};
+
+static MagicDiv32 compute_clip_division_magic(std::uint32_t d, std::uint32_t n_max) {
+    if (d == 0)
+        return {};
+    if (d == 1)
+        return {1u, 0, true};
+
+    const std::uint64_t k_max = std::uint64_t(n_max) / d;
+
+    for (int s = 0; s < 32; ++s)
+    {
+        const std::uint64_t pow2 = std::uint64_t(1) << (32 + s);
+        const std::uint64_t M    = (pow2 + d - 1) / d;  // ceil(2^(32+s) / d)
+        if (M > 0xFFFFFFFFu)
+            continue;
+
+        const std::uint64_t r = M * d - pow2;  // remainder, 0 <= r < d
+        // Exactness condition: k_max * r + (d - 1) * M < pow2
+        if (k_max <= (pow2 - std::uint64_t(d - 1) * M) / (r ? r : 1) && (r == 0 || k_max * r + std::uint64_t(d - 1) * M < pow2))
+            return {std::uint32_t(M), s, true};
+    }
+    return {};
+}
+
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
@@ -1186,6 +1232,7 @@ struct Network::Impl {
     std::int32_t hiddenQuantizedOne = 0;
     std::int32_t weightScaleHidden  = 0;
     std::int64_t outputScale        = 0;
+    MagicDiv32   clipMagic;
 
     std::array<BucketLayers<kExpectedH1Pos, kExpectedPosH2, kExpectedPosH3>, kExpectedBucketCount>
       positionalBuckets{};
@@ -1292,6 +1339,21 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
                                          newImpl->hiddenQuantizedOne, newImpl->weightScaleHidden,
                                          newImpl->outputScale, err))
         return false;
+
+    // Precompute magic number for the exact integer clip/quantize division.
+    // n_max = max_pre_activation * hiddenQuantizedOne + ftQuantizedOne/2
+    // Conservative bound: 34 active features × 32767 max i16 weight ≈ 1.1M pre-activation.
+    if (newImpl->ftQuantizedOne > 0 && newImpl->hiddenQuantizedOne > 0)
+    {
+        const std::uint32_t maxPreAct =
+          std::uint32_t(kMaxActiveFeatures + 1) * 32767u;  // bias + features
+        const std::uint32_t n_max =
+          maxPreAct * std::uint32_t(newImpl->hiddenQuantizedOne)
+          + std::uint32_t(newImpl->ftQuantizedOne / 2);
+        newImpl->clipMagic =
+          compute_clip_division_magic(std::uint32_t(newImpl->ftQuantizedOne), n_max);
+    }
+
     if (!verify_file_checksums(bytes, newImpl->header, err))
         return false;
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
@@ -1755,6 +1817,7 @@ bool fused_positional_h1_update_rows_exact(
   const std::array<int, RowCount>& signs,
   std::int32_t ftQuantizedOne,
   std::int32_t hiddenQuantizedOne,
+  const MagicDiv32& clipMagic,
   std::array<std::int32_t, kExpectedH1Pos>& nextH1Pre,
   std::array<std::uint8_t, kExpectedH1Pos>& nextH1Clip) {
     for (const auto* row : rows)
@@ -1764,7 +1827,56 @@ bool fused_positional_h1_update_rows_exact(
 #if NNUEX_HAS_AVX2_INTRINSICS
     if (ftQuantizedOne > 0 && hiddenQuantizedOne > 0 && hiddenQuantizedOne <= 255)
     {
-        const __m256i zero32    = _mm256_setzero_si256();
+        const __m256i zero32 = _mm256_setzero_si256();
+
+        if (clipMagic.valid)
+        {
+            // Integer-only clip/quantize path using precomputed magic division.
+            const __m256i hiddenQVec = _mm256_set1_epi32(hiddenQuantizedOne);
+            const __m256i halfVec    = _mm256_set1_epi32(ftQuantizedOne / 2);
+            const __m256i magicVec   = _mm256_set1_epi32(std::int32_t(clipMagic.magic));
+            const int     extraShift = clipMagic.shift;
+
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+            {
+                __m256i acc =
+                  _mm256_loadu_si256(reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
+
+                for (std::size_t i = 0; i < RowCount; ++i)
+                {
+                    const int sign = signs[i];
+                    if (!sign)
+                        continue;
+
+                    const __m128i row16 =
+                      _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
+                    const __m256i row32 = _mm256_cvtepi16_epi32(row16);
+                    acc                 = sign > 0 ? _mm256_add_epi32(acc, row32)
+                                                   : _mm256_sub_epi32(acc, row32);
+                }
+
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
+
+                // ReLU → integer clip/quantize → pack to u8
+                const __m256i xPos = _mm256_max_epi32(acc, zero32);
+                const __m256i num  = _mm256_add_epi32(
+                  _mm256_mullo_epi32(xPos, hiddenQVec), halfVec);
+                __m256i q32 = mulhi_epu32_avx2(num, magicVec);
+                if (extraShift > 0)
+                    q32 = _mm256_srli_epi32(q32, extraShift);
+                q32 = _mm256_min_epu32(q32, hiddenQVec);
+
+                const __m128i qLo = _mm256_castsi256_si128(q32);
+                const __m128i qHi = _mm256_extracti128_si256(q32, 1);
+                const __m128i q16 = _mm_packus_epi32(qLo, qHi);
+                const __m128i q8  = _mm_packus_epi16(q16, q16);
+                _mm_storel_epi64(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), q8);
+            }
+
+            return true;
+        }
+
+        // Fallback: f64 division path (when magic number is not available).
         const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
         const __m256d hiddenQ0d = _mm256_setzero_pd();
         const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
@@ -1878,7 +1990,50 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
 #if NNUEX_HAS_AVX2_INTRINSICS
     if (hiddenQuantizedOne <= 255)
     {
-        const __m256i zero32    = _mm256_setzero_si256();
+        const __m256i zero32 = _mm256_setzero_si256();
+
+        if (impl.clipMagic.valid)
+        {
+            const __m256i hiddenQVec = _mm256_set1_epi32(hiddenQuantizedOne);
+            const __m256i halfVec    = _mm256_set1_epi32(ftQuantizedOne / 2);
+            const __m256i magicVec   = _mm256_set1_epi32(std::int32_t(impl.clipMagic.magic));
+            const int     extraShift = impl.clipMagic.shift;
+
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 8)
+            {
+                const __m128i bias16 =
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(impl.positionalHidden1Bias.data() + j));
+                __m256i acc = _mm256_cvtepi16_epi32(bias16);
+
+                for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+                {
+                    const __m128i row16 =
+                      _mm_loadu_si128(reinterpret_cast<const __m128i*>(rows[i] + j));
+                    acc = _mm256_add_epi32(acc, _mm256_cvtepi16_epi32(row16));
+                }
+
+                if (outH1Pre)
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
+
+                const __m256i xPos = _mm256_max_epi32(acc, zero32);
+                const __m256i num  = _mm256_add_epi32(
+                  _mm256_mullo_epi32(xPos, hiddenQVec), halfVec);
+                __m256i q32 = mulhi_epu32_avx2(num, magicVec);
+                if (extraShift > 0)
+                    q32 = _mm256_srli_epi32(q32, extraShift);
+                q32 = _mm256_min_epu32(q32, hiddenQVec);
+
+                const __m128i qLo = _mm256_castsi256_si128(q32);
+                const __m128i qHi = _mm256_extracti128_si256(q32, 1);
+                const __m128i q16 = _mm_packus_epi32(qLo, qHi);
+                const __m128i q8  = _mm_packus_epi16(q16, q16);
+                _mm_storel_epi64(reinterpret_cast<__m128i*>(outH1Clip.data() + j), q8);
+            }
+
+            return true;
+        }
+
+        // Fallback: f64 division path.
         const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
         const __m256d hiddenQ0d = _mm256_setzero_pd();
         const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
@@ -2115,7 +2270,7 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                    prev.positionalH1Pre,
                    {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow, stmRowPos},
                    {-1, +1, -1, +1, stmSign}, impl.ftQuantizedOne, impl.hiddenQuantizedOne,
-                   next.positionalH1Pre, next.positionalH1Clip)
+                   impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
                    prev.psqtBucketAcc, {fromPsqtRow, kingToPsqtRow, rookFromPsqtRow, rookToPsqtRow},
                    {-1, +1, -1, +1}, next.psqtBucketAcc);
@@ -2144,7 +2299,7 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                 ok = fused_positional_h1_update_rows_exact<4>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow, stmRowPos},
                        {-1, +1, -1, stmSign}, impl.ftQuantizedOne, impl.hiddenQuantizedOne,
-                       next.positionalH1Pre, next.positionalH1Clip)
+                       impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<3>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow, capturePsqtRow}, {-1, +1, -1},
                        next.psqtBucketAcc);
@@ -2153,8 +2308,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
             {
                 ok = fused_positional_h1_update_rows_exact<3>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, stmRowPos}, {-1, +1, stmSign},
-                       impl.ftQuantizedOne, impl.hiddenQuantizedOne, next.positionalH1Pre,
-                       next.positionalH1Clip)
+                       impl.ftQuantizedOne, impl.hiddenQuantizedOne,
+                       impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<2>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow}, {-1, +1}, next.psqtBucketAcc);
             }
@@ -2198,7 +2353,7 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
         if (!fused_positional_h1_update_rows_exact<1>(
               prev.positionalH1Pre, {stmRowPos}, {stmSign}, impl.ftQuantizedOne,
-              impl.hiddenQuantizedOne, next.positionalH1Pre, next.positionalH1Clip))
+              impl.hiddenQuantizedOne, impl.clipMagic, next.positionalH1Pre, next.positionalH1Clip))
         {
             return false;
         }
