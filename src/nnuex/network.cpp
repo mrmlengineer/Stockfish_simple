@@ -1326,6 +1326,7 @@ struct Network::Impl {
     std::int32_t weightScaleHidden        = 0;
     std::int64_t outputScale              = 0;
     int          positionalFtShift        = 0;  // log2(positionalFtQuantizedOne) when power-of-two, else 0
+    std::int16_t positionalMulhrsK        = 0;  // hiddenQ * 2^(ftShift-1) when it fits in i16, else 0
 
     std::array<BucketLayers<kExpectedH1Pos, kExpectedPosH2, kExpectedPosH3>, kExpectedBucketCount>
       positionalBuckets{};
@@ -1440,6 +1441,17 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
 
     // Precompute shift for power-of-two positional FT scale (used for integer clip/quantize).
     newImpl->positionalFtShift = log2_power_of_two(newImpl->positionalFtQuantizedOne);
+
+    // Precompute mulhrs constant for i16-only clip/quantize via vpmulhrsw.
+    // mulhrsK = hiddenQ * 2^(ftShift-1).  mulhrs(a, mulhrsK) = (a*mulhrsK+16384)>>15
+    // which equals (a*hiddenQ + ftQ/2) >> ftShift when mulhrsK fits in signed i16.
+    if (newImpl->positionalFtShift > 0 && newImpl->hiddenQuantizedOne > 0)
+    {
+        const std::int32_t k =
+          newImpl->hiddenQuantizedOne * (std::int32_t(1) << (newImpl->positionalFtShift - 1));
+        if (k > 0 && k <= 32767)
+            newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
+    }
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1509,7 +1521,8 @@ void Network::verify(std::string evalfilePath,
        << h.labelScalePositional
        << " | PSQT_FT_Q=" << impl_->psqtFtQuantizedOne
        << " POS_FT_Q=" << impl_->positionalFtQuantizedOne
-       << " (shift=" << impl_->positionalFtShift << ")"
+       << " (shift=" << impl_->positionalFtShift
+       << ", mulhrsK=" << impl_->positionalMulhrsK << ")"
        << " | engine_output_scale=" << impl_->engineValueOutputScale;
     if (impl_->metadataJsonPresent)
         ss << " | metadata-json";
@@ -1906,6 +1919,7 @@ bool fused_positional_h1_update_rows_exact(
   std::int32_t ftQuantizedOne,
   std::int32_t hiddenQuantizedOne,
   int ftShift,
+  std::int16_t mulhrsK,
   std::array<std::int16_t, kExpectedH1Pos>& nextH1Pre,
   std::array<std::uint8_t, kExpectedH1Pos>& nextH1Clip) {
     for (const auto* row : rows)
@@ -1919,9 +1933,52 @@ bool fused_positional_h1_update_rows_exact(
         const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
         const __m256i half32    = _mm256_set1_epi32(ftQuantizedOne / 2);
 
+        if (mulhrsK > 0)
+        {
+            // i16-only clip/quantize via vpmulhrsw: no i32 widening needed.
+            // mulhrs(a, mulhrsK) = (a * mulhrsK + 16384) >> 15
+            //                    = (a * hiddenQ + ftQ/2) >> ftShift   (bit-exact)
+            const __m256i mulhrsKVec = _mm256_set1_epi16(mulhrsK);
+            const __m256i hiddenQ16  = _mm256_set1_epi16(static_cast<std::int16_t>(hiddenQuantizedOne));
+
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            {
+                __m256i acc = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
+
+                for (std::size_t i = 0; i < RowCount; ++i)
+                {
+                    const int sign = signs[i];
+                    if (!sign)
+                        continue;
+
+                    const __m256i row = _mm256_loadu_si256(
+                      reinterpret_cast<const __m256i*>(rows[i] + j));
+                    acc = sign > 0 ? _mm256_add_epi16(acc, row)
+                                   : _mm256_sub_epi16(acc, row);
+                }
+
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
+
+                // ReLU + quantize + clamp, entirely in i16
+                const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
+                __m256i q16 = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
+                q16 = _mm256_min_epi16(q16, hiddenQ16);
+
+                // Pack i16 → u8 (16 values → 16 bytes)
+                const __m128i lo = _mm256_castsi256_si128(q16);
+                const __m128i hi = _mm256_extracti128_si256(q16, 1);
+                const __m128i p8 = _mm_packus_epi16(lo, hi);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), p8);
+            }
+
+            return true;
+        }
+
         if (ftShift > 0)
         {
-            // i16 accumulation (16 lanes) + power-of-2 shift clip/quantize.
+            // Fallback: i16 accumulation + i32 widening shift clip/quantize.
+            // Used when mulhrsK overflows i16.
             const __m128i shift128 = _mm_cvtsi32_si128(ftShift);
 
             for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
@@ -1943,16 +2000,12 @@ bool fused_positional_h1_update_rows_exact(
 
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
 
-                // ReLU in i16
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-
-                // Widen to i32 for multiply (overflow: max ~963 * 127 = 122K > i16)
                 const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
                 const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
                 const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
                 const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
 
-                // (acc * hiddenQ + half) >> ftShift, clamped to [0, hiddenQ]
                 __m256i qLo = _mm256_srl_epi32(
                   _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
                 qLo = _mm256_min_epu32(qLo, hiddenQ32);
@@ -1960,7 +2013,6 @@ bool fused_positional_h1_update_rows_exact(
                   _mm256_add_epi32(_mm256_mullo_epi32(xHi32, hiddenQ32), half32), shift128);
                 qHi = _mm256_min_epu32(qHi, hiddenQ32);
 
-                // Pack i32 → i16 → u8 (16 values → 16 bytes)
                 const __m128i pLo16 = _mm_packus_epi32(
                   _mm256_castsi256_si128(qLo), _mm256_extracti128_si256(qLo, 1));
                 const __m128i pHi16 = _mm_packus_epi32(
@@ -2106,14 +2158,14 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
         const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
         const __m256i half32    = _mm256_set1_epi32(ftQuantizedOne / 2);
 
-        if (impl.positionalFtShift > 0)
+        if (impl.positionalMulhrsK > 0)
         {
-            // i16 accumulation (16 lanes) + power-of-2 shift clip/quantize.
-            const __m128i shift128 = _mm_cvtsi32_si128(impl.positionalFtShift);
+            // i16-only clip/quantize via vpmulhrsw: no i32 widening needed.
+            const __m256i mulhrsKVec = _mm256_set1_epi16(impl.positionalMulhrsK);
+            const __m256i hiddenQ16  = _mm256_set1_epi16(static_cast<std::int16_t>(hiddenQuantizedOne));
 
             for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
             {
-                // Bias is already i16 — load directly as 16 lanes.
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
 
@@ -2127,16 +2179,46 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                 if (outH1Pre)
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
 
-                // ReLU in i16
+                // ReLU + quantize + clamp, entirely in i16
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
+                __m256i q16 = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
+                q16 = _mm256_min_epi16(q16, hiddenQ16);
 
-                // Widen to i32 for multiply
+                const __m128i lo = _mm256_castsi256_si128(q16);
+                const __m128i hi = _mm256_extracti128_si256(q16, 1);
+                const __m128i p8 = _mm_packus_epi16(lo, hi);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(outH1Clip.data() + j), p8);
+            }
+
+            return true;
+        }
+
+        if (impl.positionalFtShift > 0)
+        {
+            // Fallback: i16 accumulation + i32 widening shift clip/quantize.
+            const __m128i shift128 = _mm_cvtsi32_si128(impl.positionalFtShift);
+
+            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            {
+                __m256i acc = _mm256_loadu_si256(
+                  reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
+
+                for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+                {
+                    const __m256i row = _mm256_loadu_si256(
+                      reinterpret_cast<const __m256i*>(rows[i] + j));
+                    acc = _mm256_add_epi16(acc, row);
+                }
+
+                if (outH1Pre)
+                    _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
+
+                const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
                 const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
                 const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
                 const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
                 const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
 
-                // (acc * hiddenQ + half) >> ftShift, clamped to [0, hiddenQ]
                 __m256i qLo = _mm256_srl_epi32(
                   _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
                 qLo = _mm256_min_epu32(qLo, hiddenQ32);
@@ -2406,7 +2488,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                    prev.positionalH1Pre,
                    {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow, stmRowPos},
                    {-1, +1, -1, +1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                   impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
+                   impl.positionalFtShift, impl.positionalMulhrsK,
+                   next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
                    prev.psqtBucketAcc, {fromPsqtRow, kingToPsqtRow, rookFromPsqtRow, rookToPsqtRow},
                    {-1, +1, -1, +1}, next.psqtBucketAcc);
@@ -2435,7 +2518,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                 ok = fused_positional_h1_update_rows_exact<4>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow, stmRowPos},
                        {-1, +1, -1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
+                       impl.positionalFtShift, impl.positionalMulhrsK,
+                       next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<3>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow, capturePsqtRow}, {-1, +1, -1},
                        next.psqtBucketAcc);
@@ -2445,7 +2529,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                 ok = fused_positional_h1_update_rows_exact<3>(
                        prev.positionalH1Pre, {fromPosRow, toPosRow, stmRowPos}, {-1, +1, stmSign},
                        impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip)
+                       impl.positionalFtShift, impl.positionalMulhrsK,
+                       next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<2>(
                        prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow}, {-1, +1}, next.psqtBucketAcc);
             }
@@ -2489,7 +2574,8 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
         if (!fused_positional_h1_update_rows_exact<1>(
               prev.positionalH1Pre, {stmRowPos}, {stmSign}, impl.positionalFtQuantizedOne,
-              impl.hiddenQuantizedOne, impl.positionalFtShift, next.positionalH1Pre, next.positionalH1Clip))
+              impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
+              next.positionalH1Pre, next.positionalH1Clip))
         {
             return false;
         }
