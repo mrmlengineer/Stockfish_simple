@@ -395,10 +395,13 @@ std::int64_t dense_output_acc_q_fixed_32(const std::uint8_t* input,
         const __m256i pairSums16 = _mm256_maddubs_epi16(inVec, wVec);
         const __m256i laneSums32 = _mm256_madd_epi16(pairSums16, _mm256_set1_epi16(1));
 
-        alignas(32) std::int32_t partial[8];
-        _mm256_store_si256(reinterpret_cast<__m256i*>(partial), laneSums32);
-        for (int i = 0; i < 8; ++i)
-            acc += partial[i];
+        // Horizontal reduction in register (avoids store-to-load forwarding).
+        const __m128i lo = _mm256_castsi256_si128(laneSums32);
+        const __m128i hi = _mm256_extracti128_si256(laneSums32, 1);
+        __m128i sum128 = _mm_add_epi32(lo, hi);
+        sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+        sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
+        acc += _mm_cvtsi128_si32(sum128);
         return acc;
     }
 #endif
