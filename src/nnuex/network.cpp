@@ -1441,6 +1441,12 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
 
     // Precompute shift for power-of-two positional FT scale (used for integer clip/quantize).
     newImpl->positionalFtShift = log2_power_of_two(newImpl->positionalFtQuantizedOne);
+    if (newImpl->positionalFtShift <= 0)
+    {
+        err = "positionalFtQuantizedOne (" + std::to_string(newImpl->positionalFtQuantizedOne)
+            + ") is not a power of two; non-power-of-two FT scales are not supported";
+        return false;
+    }
 
     // Precompute mulhrs constant for i16-only clip/quantize via vpmulhrsw.
     // mulhrsK = hiddenQ * 2^(ftShift-1).  mulhrs(a, mulhrsK) = (a*mulhrsK+16384)>>15
@@ -2024,68 +2030,6 @@ bool fused_positional_h1_update_rows_exact(
             return true;
         }
 
-        // Fallback: i16 accumulation + f64 division clip path.
-        const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
-        const __m256d hiddenQ0d = _mm256_setzero_pd();
-        const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
-        const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
-
-        for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
-        {
-            __m256i acc = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
-
-            for (std::size_t i = 0; i < RowCount; ++i)
-            {
-                const int sign = signs[i];
-                if (!sign)
-                    continue;
-
-                const __m256i row = _mm256_loadu_si256(
-                  reinterpret_cast<const __m256i*>(rows[i] + j));
-                acc = sign > 0 ? _mm256_add_epi16(acc, row)
-                               : _mm256_sub_epi16(acc, row);
-            }
-
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
-
-            const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-            const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
-            const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
-
-            // Process low 8 values (4+4 via f64)
-            const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
-            const __m128i xLo32Lo = _mm256_castsi256_si128(xLo32);
-            const __m128i xLo32Hi = _mm256_extracti128_si256(xLo32, 1);
-            __m256d dA = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Lo), hiddenQd), halfD), denomD);
-            __m256d dB = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Hi), hiddenQd), halfD), denomD);
-            dA = _mm256_min_pd(_mm256_max_pd(dA, hiddenQ0d), hiddenQd);
-            dB = _mm256_min_pd(_mm256_max_pd(dB, hiddenQ0d), hiddenQd);
-            const __m128i rLoA = _mm256_cvttpd_epi32(dA);
-            const __m128i rLoB = _mm256_cvttpd_epi32(dB);
-            const __m128i rLo16 = _mm_packus_epi32(rLoA, rLoB);
-
-            // Process high 8 values
-            const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
-            const __m128i xHi32Lo = _mm256_castsi256_si128(xHi32);
-            const __m128i xHi32Hi = _mm256_extracti128_si256(xHi32, 1);
-            __m256d dC = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Lo), hiddenQd), halfD), denomD);
-            __m256d dD = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Hi), hiddenQd), halfD), denomD);
-            dC = _mm256_min_pd(_mm256_max_pd(dC, hiddenQ0d), hiddenQd);
-            dD = _mm256_min_pd(_mm256_max_pd(dD, hiddenQ0d), hiddenQd);
-            const __m128i rHiA = _mm256_cvttpd_epi32(dC);
-            const __m128i rHiB = _mm256_cvttpd_epi32(dD);
-            const __m128i rHi16 = _mm_packus_epi32(rHiA, rHiB);
-
-            const __m128i p8 = _mm_packus_epi16(rLo16, rHi16);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(nextH1Clip.data() + j), p8);
-        }
-
-        return true;
     }
 #endif
 
@@ -2237,62 +2181,6 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
             return true;
         }
 
-        // Fallback: i16 accumulation + f64 division clip path.
-        const __m256d hiddenQd  = _mm256_set1_pd(double(hiddenQuantizedOne));
-        const __m256d hiddenQ0d = _mm256_setzero_pd();
-        const __m256d denomD    = _mm256_set1_pd(double(ftQuantizedOne));
-        const __m256d halfD     = _mm256_set1_pd(double(ftQuantizedOne / 2));
-
-        for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
-        {
-            __m256i acc = _mm256_loadu_si256(
-              reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
-
-            for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-            {
-                const __m256i row = _mm256_loadu_si256(
-                  reinterpret_cast<const __m256i*>(rows[i] + j));
-                acc = _mm256_add_epi16(acc, row);
-            }
-
-            if (outH1Pre)
-                _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
-
-            const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-            const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
-            const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
-
-            const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
-            const __m128i xLo32Lo = _mm256_castsi256_si128(xLo32);
-            const __m128i xLo32Hi = _mm256_extracti128_si256(xLo32, 1);
-            __m256d dA = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Lo), hiddenQd), halfD), denomD);
-            __m256d dB = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xLo32Hi), hiddenQd), halfD), denomD);
-            dA = _mm256_min_pd(_mm256_max_pd(dA, hiddenQ0d), hiddenQd);
-            dB = _mm256_min_pd(_mm256_max_pd(dB, hiddenQ0d), hiddenQd);
-            const __m128i rLoA = _mm256_cvttpd_epi32(dA);
-            const __m128i rLoB = _mm256_cvttpd_epi32(dB);
-            const __m128i rLo16 = _mm_packus_epi32(rLoA, rLoB);
-
-            const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
-            const __m128i xHi32Lo = _mm256_castsi256_si128(xHi32);
-            const __m128i xHi32Hi = _mm256_extracti128_si256(xHi32, 1);
-            __m256d dC = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Lo), hiddenQd), halfD), denomD);
-            __m256d dD = _mm256_div_pd(
-              _mm256_add_pd(_mm256_mul_pd(_mm256_cvtepi32_pd(xHi32Hi), hiddenQd), halfD), denomD);
-            dC = _mm256_min_pd(_mm256_max_pd(dC, hiddenQ0d), hiddenQd);
-            dD = _mm256_min_pd(_mm256_max_pd(dD, hiddenQ0d), hiddenQd);
-            const __m128i rHiA = _mm256_cvttpd_epi32(dC);
-            const __m128i rHiB = _mm256_cvttpd_epi32(dD);
-            const __m128i rHi16 = _mm_packus_epi32(rHiA, rHiB);
-
-            const __m128i p8 = _mm_packus_epi16(rLo16, rHi16);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(outH1Clip.data() + j), p8);
-        }
-
-        return true;
     }
 #endif
 
