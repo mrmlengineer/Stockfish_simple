@@ -13,6 +13,10 @@
 #include <string_view>
 #include <utility>
 
+#ifndef NNUEX_H1_POSITIONAL
+  #define NNUEX_H1_POSITIONAL 384
+#endif
+
 #include "../types.h"
 
 namespace Stockfish {
@@ -50,9 +54,9 @@ struct IncrementalState {
     // - positionalH1Pre: i16 pre-activation accumulator for positional_hidden_1
     // - positionalH1Clip: q127 clipped activation for positional_hidden_1
     // - psqtBucketAcc: unsigned direct PSQT accumulator for all 8 piece buckets
-    alignas(64) std::array<std::int16_t, 384> positionalH1Pre{};
-    alignas(64) std::array<std::uint8_t, 384> positionalH1Clip{};
-    alignas(32) std::array<std::int32_t, 8>   psqtBucketAcc{};
+    alignas(64) std::array<std::int16_t, NNUEX_H1_POSITIONAL> positionalH1Pre{};
+    alignas(64) std::array<std::uint8_t, NNUEX_H1_POSITIONAL> positionalH1Clip{};
+    alignas(32) std::array<std::int32_t, 8>                   psqtBucketAcc{};
 };
 
 struct RuntimeMetrics {

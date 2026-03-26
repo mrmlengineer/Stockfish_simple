@@ -371,6 +371,7 @@ void Search::Worker::push_nnuex_incremental_move(const Position&  posAfterMove,
 
     auto&      next           = nnuexAccumulatorStack[nnuexAccumulatorSize];
     next                      = NNUEXAccumulatorEntry{};
+    auto&      net            = nnuex[numaAccessToken];
     next.move                 = move;
     next.dirtyPiece           = dirtyPiece;
     next.key                  = posAfterMove.key();
@@ -380,7 +381,6 @@ void Search::Worker::push_nnuex_incremental_move(const Position&  posAfterMove,
 
     if (!use_nnuex_lazy_incremental_stack())
     {
-        auto&      net  = nnuex[numaAccessToken];
         const auto& prev = nnuexAccumulatorStack[nnuexAccumulatorSize - 1];
         bool        ok   = false;
 
@@ -424,6 +424,7 @@ void Search::Worker::push_nnuex_incremental_null(const Position& posAfterNull) {
 
     auto&      next           = nnuexAccumulatorStack[nnuexAccumulatorSize];
     next                      = NNUEXAccumulatorEntry{};
+    auto&      net            = nnuex[numaAccessToken];
     next.key                  = posAfterNull.key();
     next.stmBlack             = posAfterNull.side_to_move() == BLACK ? 1 : 0;
     next.isNull               = true;
@@ -431,7 +432,6 @@ void Search::Worker::push_nnuex_incremental_null(const Position& posAfterNull) {
 
     if (!use_nnuex_lazy_incremental_stack())
     {
-        auto&      net  = nnuex[numaAccessToken];
         const auto& prev = nnuexAccumulatorStack[nnuexAccumulatorSize - 1];
         bool        ok   = false;
 

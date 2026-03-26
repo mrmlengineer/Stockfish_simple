@@ -51,9 +51,9 @@ using SteadyClock = std::chrono::steady_clock;
 
 constexpr std::uint32_t kExpectedInputSize   = 737;
 constexpr std::uint32_t kExpectedBucketCount = 16;
-constexpr std::uint32_t kExpectedH1Total     = 384;
+constexpr std::uint32_t kExpectedH1Total     = NNUEX_H1_POSITIONAL;
 constexpr std::uint32_t kExpectedH1Psqt      = 0;
-constexpr std::uint32_t kExpectedH1Pos       = 384;
+constexpr std::uint32_t kExpectedH1Pos       = NNUEX_H1_POSITIONAL;
 constexpr std::uint32_t kExpectedPsqtH2      = 0;
 constexpr std::uint32_t kExpectedPosH2       = 16;
 constexpr std::uint32_t kExpectedPsqtH3      = 0;
@@ -61,6 +61,8 @@ constexpr std::uint32_t kExpectedPosH3       = 32;
 constexpr std::uint32_t kExpectedOutputs     = 2;
 constexpr std::size_t   kMaxActiveFeatures   = 33;  // 32 pieces + side-to-move bit
 constexpr std::size_t   kPieceBucketCount    = 8;
+
+static_assert((NNUEX_H1_POSITIONAL % 16) == 0, "NNUEX_H1_POSITIONAL must be divisible by 16");
 
 constexpr std::uint32_t kExpectedFeatureVariantId = 2;
 constexpr std::uint32_t kExpectedBucketSchemeId   = 1;
@@ -177,13 +179,13 @@ void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
     }
 }
 
-void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
-                                    std::size_t                      inputDim,
-                                    const std::int8_t*               weight,
-                                    const std::int32_t*              bias,
-                                    std::int32_t                     weightScaleHidden,
-                                    std::int32_t                     hiddenQuantizedOne,
-                                    std::uint8_t*                    out) {
+void dense_layer_clip_q_avx2_out16(const std::uint8_t* input,
+                                   std::size_t         inputDim,
+                                   const std::int8_t*  weight,
+                                   const std::int32_t* bias,
+                                   std::int32_t        weightScaleHidden,
+                                   std::int32_t        hiddenQuantizedOne,
+                                   std::uint8_t*       out) {
     __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
     __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
 
@@ -212,13 +214,13 @@ void dense_layer_clip_q_avx2_out16(const std::uint8_t*              input,
     quantize_clip_i32_to_u8_avx2_exact(acc, 16, weightScaleHidden, hiddenQuantizedOne, out);
 }
 
-void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
-                                    std::size_t                      inputDim,
-                                    const std::int8_t*               weight,
-                                    const std::int32_t*              bias,
-                                    std::int32_t                     weightScaleHidden,
-                                    std::int32_t                     hiddenQuantizedOne,
-                                    std::uint8_t*                    out) {
+void dense_layer_clip_q_avx2_out32(const std::uint8_t* input,
+                                   std::size_t         inputDim,
+                                   const std::int8_t*  weight,
+                                   const std::int32_t* bias,
+                                   std::int32_t        weightScaleHidden,
+                                   std::int32_t        hiddenQuantizedOne,
+                                   std::uint8_t*       out) {
     __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias));
     __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 8));
     __m256i acc2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bias + 16));
@@ -256,11 +258,11 @@ void dense_layer_clip_q_avx2_out32(const std::uint8_t*              input,
 
 template<std::size_t InputDim>
 void dense_layer_clip_q_avx2_packed_out16(const std::uint8_t* input,
-                                           const std::int8_t*  weightPacked4,
-                                           const std::int32_t* bias,
-                                           std::int32_t        weightScaleHidden,
-                                           std::int32_t        hiddenQuantizedOne,
-                                           std::uint8_t*       out) {
+                                          const std::int8_t*  weightPacked4,
+                                          const std::int32_t* bias,
+                                          std::int32_t        weightScaleHidden,
+                                          std::int32_t        hiddenQuantizedOne,
+                                          std::uint8_t*       out) {
     static_assert(InputDim % 4 == 0, "InputDim must be divisible by 4");
     constexpr std::size_t chunkCount = InputDim / 4;
 
@@ -275,8 +277,8 @@ void dense_layer_clip_q_avx2_packed_out16(const std::uint8_t* input,
         const __m256i inVec = _mm256_set1_epi32(static_cast<std::int32_t>(in4));
         const auto*   wChunk = weightPacked4 + c * (16 * 4);
 
-        const __m256i w0 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk));
-        const __m256i w1 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
+        const __m256i w0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk));
+        const __m256i w1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
 
         const __m256i pair0 = _mm256_maddubs_epi16(inVec, w0);
         const __m256i pair1 = _mm256_maddubs_epi16(inVec, w1);
@@ -292,11 +294,11 @@ void dense_layer_clip_q_avx2_packed_out16(const std::uint8_t* input,
 
 template<std::size_t InputDim>
 void dense_layer_clip_q_avx2_packed_out32(const std::uint8_t* input,
-                                           const std::int8_t*  weightPacked4,
-                                           const std::int32_t* bias,
-                                           std::int32_t        weightScaleHidden,
-                                           std::int32_t        hiddenQuantizedOne,
-                                           std::uint8_t*       out) {
+                                          const std::int8_t*  weightPacked4,
+                                          const std::int32_t* bias,
+                                          std::int32_t        weightScaleHidden,
+                                          std::int32_t        hiddenQuantizedOne,
+                                          std::uint8_t*       out) {
     static_assert(InputDim % 4 == 0, "InputDim must be divisible by 4");
     constexpr std::size_t chunkCount = InputDim / 4;
 
@@ -313,10 +315,10 @@ void dense_layer_clip_q_avx2_packed_out32(const std::uint8_t* input,
         const __m256i inVec = _mm256_set1_epi32(static_cast<std::int32_t>(in4));
         const auto*   wChunk = weightPacked4 + c * (32 * 4);
 
-        const __m256i w0 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk));
-        const __m256i w1 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
-        const __m256i w2 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 64));
-        const __m256i w3 = _mm256_load_si256(reinterpret_cast<const __m256i*>(wChunk + 96));
+        const __m256i w0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk));
+        const __m256i w1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk + 32));
+        const __m256i w2 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk + 64));
+        const __m256i w3 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(wChunk + 96));
 
         const __m256i pair0 = _mm256_maddubs_epi16(inVec, w0);
         const __m256i pair1 = _mm256_maddubs_epi16(inVec, w1);
@@ -380,7 +382,8 @@ void dense_layer_clip_q_fixed_out16(const std::uint8_t* input,
         dense_layer_clip_q_avx2_out16(input, InputDim, weight, bias, weightScaleHidden,
                                       hiddenQuantizedOne, out);
 #else
-    dense_layer_clip_q_scalar_fixed<InputDim, 16>(input, weight, bias, weightScaleHidden, hiddenQuantizedOne, out);
+    dense_layer_clip_q_scalar_fixed<InputDim, 16>(input, weight, bias, weightScaleHidden,
+                                                  hiddenQuantizedOne, out);
 #endif
 }
 
@@ -400,7 +403,8 @@ void dense_layer_clip_q_fixed_out32(const std::uint8_t* input,
         dense_layer_clip_q_avx2_out32(input, InputDim, weight, bias, weightScaleHidden,
                                       hiddenQuantizedOne, out);
 #else
-    dense_layer_clip_q_scalar_fixed<InputDim, 32>(input, weight, bias, weightScaleHidden, hiddenQuantizedOne, out);
+    dense_layer_clip_q_scalar_fixed<InputDim, 32>(input, weight, bias, weightScaleHidden,
+                                                  hiddenQuantizedOne, out);
 #endif
 }
 
@@ -710,8 +714,8 @@ bool validate_supported_architecture(const Header& h, std::string& err) {
 
     if (h.hidden1Total != kExpectedH1Total || h.hidden1Psqt != kExpectedH1Psqt
         || h.hidden1Positional != kExpectedH1Pos || h.psqtH2 != kExpectedPsqtH2
-        || h.positionalH2 != kExpectedPosH2 || h.psqtH3 != kExpectedPsqtH3
-        || h.positionalH3 != kExpectedPosH3)
+        || h.positionalH2 != kExpectedPosH2
+        || h.psqtH3 != kExpectedPsqtH3 || h.positionalH3 != kExpectedPosH3)
     {
         err = "NNUEX dimensions do not match the supported bucket8-direct dual-positional contract";
         return false;

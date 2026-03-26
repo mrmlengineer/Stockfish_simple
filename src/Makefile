@@ -185,10 +185,15 @@ nnuex_runtime_options = yes
 #   The file is copied to the src directory before compilation.
 #   If unset, no file is staged and incbin embeds a 1-byte stub (external load only).
 EVALFILE =
+# NNUEX_H1_POSITIONAL = <int>  (optional)
+#   Compile-time positional hidden_1 width for the specialized NNUEX runtime.
+#   If EVALFILE is set, derive it from the .nnuex header unless explicitly overridden.
+#   If EVALFILE is unset, defaults to 384.
+NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; print(struct.unpack_from('<I', open(sys.argv[1], 'rb').read(52), 48)[0])" "$(abspath $(EVALFILE))"),384)
 # Must match the EvalFileDefaultNameNNUEX macro in nnuex/network.h (used by incbin).
 NNUEX_DEFAULT_NAME = qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex
 NNUEX_CONFIG_STAMP = .nnuex-build-config
-NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>)
+NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 NNUEX_CONFIG_OBJS = engine.o search.o nnuex/network.o
 
 ifneq ($(shell which clang-format-20 2> /dev/null),)
@@ -678,6 +683,7 @@ endif
 ifeq ($(nnuex_runtime_options),no)
 	CXXFLAGS += -DNNUEX_FIXED_MODE
 endif
+CXXFLAGS += -DNNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 ifeq ($(EVALFILE),)
 	CXXFLAGS += -DNNUE_EMBEDDING_OFF
 endif
@@ -1114,6 +1120,7 @@ config-sanity:
 	echo "target_windows: '$(target_windows)'" && \
 	echo "nnuex_runtime_options: '$(nnuex_runtime_options)'" && \
 	echo "EVALFILE: '$(EVALFILE)'" && \
+	echo "NNUEX_H1_POSITIONAL: '$(NNUEX_H1_POSITIONAL)'" && \
 	echo "" && \
 	echo "Flags:" && \
 	echo "CXX: $(CXX)" && \
