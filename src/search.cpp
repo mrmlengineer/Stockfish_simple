@@ -71,6 +71,7 @@ using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
 using SteadyClock                   = std::chrono::steady_clock;
 
 struct ScopedNsTimer {
+#ifndef NNUEX_FIXED_MODE
     explicit ScopedNsTimer(std::uint64_t* dst_) : dst(dst_) {
         if (dst)
             start = SteadyClock::now();
@@ -84,6 +85,9 @@ struct ScopedNsTimer {
 
     std::uint64_t*          dst   = nullptr;
     SteadyClock::time_point start = {};
+#else
+    explicit ScopedNsTimer(std::uint64_t*) {}
+#endif
 };
 
 void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
@@ -295,6 +299,7 @@ void Search::Worker::ensure_network_replicated() {
 }
 
 void Search::Worker::refresh_nnuex_option_cache() {
+#ifndef NNUEX_FIXED_MODE
     if (options.count("NNUEXMode") && options["NNUEXMode"] == "incremental")
         nnuexModeCached = NNUEXMode::Incremental;
     else if (options.count("NNUEXMode") && options["NNUEXMode"] == "auto")
@@ -306,6 +311,9 @@ void Search::Worker::refresh_nnuex_option_cache() {
     nnuexParityEnabledCached = nnuexModeCached == NNUEXMode::Incremental
                             && options.count("NNUEXParityCheck")
                             && int(options["NNUEXParityCheck"]) != 0;
+#else
+    nnuexModeCached = NNUEXMode::Auto;
+#endif
 }
 
 bool Search::Worker::use_nnuex_incremental_stack() const {
@@ -317,7 +325,11 @@ bool Search::Worker::use_nnuex_lazy_incremental_stack() const {
 }
 
 bool Search::Worker::use_nnuex_metrics() const {
+#ifndef NNUEX_FIXED_MODE
     return nnuexMetricsEnabledCached;
+#else
+    return false;
+#endif
 }
 
 void Search::Worker::reset_nnuex_incremental_stack() {

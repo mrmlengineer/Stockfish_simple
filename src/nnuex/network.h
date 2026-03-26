@@ -21,8 +21,10 @@ class Position;
 
 namespace Stockfish::Eval::NNUEX {
 
-inline constexpr const char* EvalFileDefaultName =
-  "export/qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex";
+#define EvalFileDefaultNameNNUEX \
+  "qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex"
+
+inline constexpr const char* EvalFileDefaultName = EvalFileDefaultNameNNUEX;
 
 struct Evaluation {
     Value psqt       = VALUE_ZERO;
@@ -68,6 +70,7 @@ struct RuntimeMetrics {
     std::uint64_t advanceNullPreClipNs    = 0;
 };
 
+#ifndef NNUEX_FIXED_MODE
 class ScopedRuntimeMetricsBinding {
    public:
     explicit ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) noexcept;
@@ -79,6 +82,15 @@ class ScopedRuntimeMetricsBinding {
    private:
     RuntimeMetrics* prev_ = nullptr;
 };
+#else
+class ScopedRuntimeMetricsBinding {
+   public:
+    explicit ScopedRuntimeMetricsBinding(RuntimeMetrics*) noexcept {}
+    ~ScopedRuntimeMetricsBinding() noexcept {}
+    ScopedRuntimeMetricsBinding(const ScopedRuntimeMetricsBinding&)            = delete;
+    ScopedRuntimeMetricsBinding& operator=(const ScopedRuntimeMetricsBinding&) = delete;
+};
+#endif
 
 class Network {
    public:
@@ -111,6 +123,7 @@ class Network {
     std::string resolve_evalfile_path(const std::string& rootDirectory,
                                      const std::string& requestedPath) const;
     bool        load_from_file(const std::string& path, std::string& err);
+    bool        load_from_memory(const unsigned char* data, std::size_t size, std::string& err);
 
     bool        initialized_ = false;
     std::string requestedPath_;

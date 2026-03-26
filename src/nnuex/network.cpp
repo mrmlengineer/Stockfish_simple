@@ -30,6 +30,18 @@
 #endif
 
 #include "../position.h"
+#include "../incbin/incbin.h"
+
+// Embed the default NNUEX network file in the binary (using incbin.h).
+// Declares: gEmbeddedNNUEXData[], *gEmbeddedNNUEXEnd, gEmbeddedNNUEXSize.
+// Disabled on MSVC (unsupported) or when NNUE_EMBEDDING_OFF is defined.
+#if !defined(_MSC_VER) && !defined(NNUE_EMBEDDING_OFF)
+INCBIN(EmbeddedNNUEX, EvalFileDefaultNameNNUEX);
+#else
+const unsigned char        gEmbeddedNNUEXData[1] = {0x0};
+const unsigned char* const gEmbeddedNNUEXEnd     = &gEmbeddedNNUEXData[1];
+const unsigned int         gEmbeddedNNUEXSize    = 1;
+#endif
 
 namespace Stockfish::Eval::NNUEX {
 
@@ -58,9 +70,14 @@ constexpr std::uint32_t kNnuexVersion             = 1;
 constexpr char          kNnuexMagic[8]            = {'C', 'D', 'N', 'N', 'U', 'E', 'X', '1'};
 constexpr int           kDefaultEngineValueOutputScale = 1;
 
+#ifndef NNUEX_FIXED_MODE
 thread_local RuntimeMetrics* gRuntimeMetricsSink = nullptr;
+#else
+static constexpr RuntimeMetrics* gRuntimeMetricsSink = nullptr;
+#endif
 
 struct ScopedRuntimeMetricTimer {
+#ifndef NNUEX_FIXED_MODE
     explicit ScopedRuntimeMetricTimer(std::uint64_t* dst_) : dst(dst_) {
         if (dst)
             start = SteadyClock::now();
@@ -74,16 +91,21 @@ struct ScopedRuntimeMetricTimer {
 
     std::uint64_t*          dst   = nullptr;
     SteadyClock::time_point start = {};
+#else
+    explicit ScopedRuntimeMetricTimer(std::uint64_t*) {}
+#endif
 };
 
 }  // namespace
 
+#ifndef NNUEX_FIXED_MODE
 ScopedRuntimeMetricsBinding::ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) noexcept :
     prev_(gRuntimeMetricsSink) {
     gRuntimeMetricsSink = sink;
 }
 
 ScopedRuntimeMetricsBinding::~ScopedRuntimeMetricsBinding() noexcept { gRuntimeMetricsSink = prev_; }
+#endif
 
 namespace {
 
@@ -1475,6 +1497,50 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
     return true;
 }
 
+bool Network::load_from_memory(const unsigned char* data, std::size_t size, std::string& err) {
+    std::vector<std::uint8_t> bytes(data, data + size);
+    auto newImpl = std::make_unique<Impl>();
+    if (!parse_header(bytes, newImpl->header, err))
+        return false;
+    if (!cache_validated_runtime_scaling(newImpl->header,
+                                         newImpl->hiddenQuantizedOne, newImpl->weightScaleHidden,
+                                         newImpl->outputScale, err))
+        return false;
+    if (!verify_file_checksums(bytes, newImpl->header, err))
+        return false;
+    if (!load_branch_ft_quantized_ones_from_metadata(
+          bytes, newImpl->header, newImpl->psqtFtQuantizedOne, newImpl->positionalFtQuantizedOne, err))
+        return false;
+
+    newImpl->positionalFtShift = log2_power_of_two(newImpl->positionalFtQuantizedOne);
+    if (newImpl->positionalFtShift <= 0)
+    {
+        err = "positionalFtQuantizedOne (" + std::to_string(newImpl->positionalFtQuantizedOne)
+            + ") is not a power of two; non-power-of-two FT scales are not supported";
+        return false;
+    }
+
+    if (newImpl->positionalFtShift > 0 && newImpl->hiddenQuantizedOne > 0)
+    {
+        const std::int32_t k =
+          newImpl->hiddenQuantizedOne * (std::int32_t(1) << (newImpl->positionalFtShift - 1));
+        if (k > 0 && k <= 32767)
+            newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
+    }
+    if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
+        return false;
+    if (!load_payload_quantized(bytes, *newImpl, err))
+        return false;
+
+    newImpl->metadataJsonPresent =
+      (newImpl->header.flags & 1u) != 0 && newImpl->header.metadataJsonBytes > 0;
+
+    delete impl_;
+    impl_        = newImpl.release();
+    initialized_ = true;
+    return true;
+}
+
 void Network::load(const std::string& rootDirectory, std::string evalfilePath) {
     initialized_   = false;
     requestedPath_ = std::move(evalfilePath);
@@ -1487,6 +1553,18 @@ void Network::load(const std::string& rootDirectory, std::string evalfilePath) {
     {
         error_ = "EvalFile is empty (expected .nnuex path)";
         return;
+    }
+
+    // Try embedded network when the requested path matches the default name.
+    if (requestedPath_ == EvalFileDefaultName && gEmbeddedNNUEXSize > 1)
+    {
+        std::string err;
+        if (load_from_memory(gEmbeddedNNUEXData, gEmbeddedNNUEXSize, err))
+        {
+            loadedPath_ = "<embedded>";
+            return;
+        }
+        // Fall through to file-based loading on failure.
     }
 
     const std::string resolved = resolve_evalfile_path(rootDirectory, requestedPath_);

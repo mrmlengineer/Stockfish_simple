@@ -175,6 +175,22 @@ lsx = no
 lasx = no
 STRIP = strip
 
+# NNUEX build options
+# nnuex_runtime_options = yes/no  (default: yes)
+#   When "no", compiles with -DNNUEX_FIXED_MODE: removes NNUEXMode/NNUEXMetrics/
+#   NNUEXParityCheck UCI options, fixes mode to auto at compile time.
+nnuex_runtime_options = yes
+# EVALFILE = <path>  (optional)
+#   Path to the .nnuex file to embed in the binary via incbin.
+#   The file is copied to the src directory before compilation.
+#   If unset, no file is staged and incbin embeds a 1-byte stub (external load only).
+EVALFILE =
+# Must match the EvalFileDefaultNameNNUEX macro in nnuex/network.h (used by incbin).
+NNUEX_DEFAULT_NAME = qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex
+NNUEX_CONFIG_STAMP = .nnuex-build-config
+NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>)
+NNUEX_CONFIG_OBJS = engine.o search.o nnuex/network.o
+
 ifneq ($(shell which clang-format-20 2> /dev/null),)
 	CLANG-FORMAT = clang-format-20
 else
@@ -658,6 +674,14 @@ else
 	CXXFLAGS += -D_GLIBCXX_ASSERTIONS -D_GLIBCXX_DEBUG
 endif
 
+### 3.2.1b NNUEX build options
+ifeq ($(nnuex_runtime_options),no)
+	CXXFLAGS += -DNNUEX_FIXED_MODE
+endif
+ifeq ($(EVALFILE),)
+	CXXFLAGS += -DNNUE_EMBEDDING_OFF
+endif
+
 ### 3.2.2 Debugging with undefined behavior sanitizers
 ifneq ($(sanitize),none)
         CXXFLAGS += -g3 $(addprefix -fsanitize=,$(sanitize))
@@ -961,6 +985,12 @@ help:
 	echo "make -j profile-build ARCH=x86-64-avxvnni" && \
 	echo "make -j profile-build ARCH=x86-64-avxvnni COMP=gcc COMPCXX=g++-12.0" && \
 	echo "make -j build ARCH=x86-64-ssse3 COMP=clang" && \
+	echo "" && \
+	echo "NNUEX options:" && \
+	echo "" && \
+	echo "EVALFILE=<path>                > Embed the given .nnuex network in the binary" && \
+	echo "nnuex_runtime_options=yes/no   > yes (default): UCI knobs for mode/metrics/parity" && \
+	echo "                               > no: fixed auto mode, no debug UCI options" && \
 	echo ""
 ifneq ($(SUPPORTED_ARCH), true)
 	@echo "Specify a supported architecture with the ARCH option for more details"
@@ -976,6 +1006,7 @@ endif
 	format analyze
 
 analyze: config-sanity objclean
+	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) net
 	$(MAKE) -k ARCH=$(ARCH) COMP=$(COMP) $(OBJS)
 
 build: config-sanity
@@ -1012,6 +1043,7 @@ clean: objclean profileclean
 # clean binaries and objects
 objclean:
 	@rm -f stockfish stockfish.exe *.o ./syzygy/*.o ./nnuex/*.o
+	@rm -f *.nnuex
 
 # clean auxiliary profiling files
 profileclean:
@@ -1024,8 +1056,15 @@ profileclean:
 	@rm -f ./-lstdc++.res
 
 # evaluation network (nnuex)
+# If EVALFILE is set, copy it to the src directory so incbin can embed it.
 net:
-	@echo "NNUEX networks are external runtime files. Set the UCI option EvalFile to a .nnuex path."
+ifneq ($(EVALFILE),)
+	@echo "Staging NNUEX network for embedding: $(EVALFILE)"
+	@cp "$(EVALFILE)" "$(NNUEX_DEFAULT_NAME)"
+else
+	@echo "No EVALFILE set. The binary will attempt to load the network from disk at runtime."
+	@echo "To embed: make build EVALFILE=path/to/network.nnuex"
+endif
 
 format:
 	$(CLANG-FORMAT) -i $(SRCS) $(HEADERS) -style=file
@@ -1034,7 +1073,13 @@ format:
 ### Section 5. Private Targets
 ### ==========================================================================
 
-all: $(EXE) .depend
+$(NNUEX_CONFIG_STAMP): FORCE
+	@printf '%s\n' '$(NNUEX_BUILD_SIGNATURE)' > $@.tmp
+	@if test -f $@ && cmp -s $@ $@.tmp; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
+
+$(NNUEX_CONFIG_OBJS): $(NNUEX_CONFIG_STAMP)
+
+all: net $(EXE) .depend
 
 config-sanity:
 	@echo ""
@@ -1067,6 +1112,8 @@ config-sanity:
 	echo "lsx: '$(lsx)'" && \
 	echo "lasx: '$(lasx)'" && \
 	echo "target_windows: '$(target_windows)'" && \
+	echo "nnuex_runtime_options: '$(nnuex_runtime_options)'" && \
+	echo "EVALFILE: '$(EVALFILE)'" && \
 	echo "" && \
 	echo "Flags:" && \
 	echo "CXX: $(CXX)" && \

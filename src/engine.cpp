@@ -135,9 +135,11 @@ Engine::Engine(std::optional<std::string> path) :
           return std::nullopt;
       }));
 
+#ifndef NNUEX_FIXED_MODE
     options.add("NNUEXMode", Option("full incremental auto", "full"));
     options.add("NNUEXParityCheck", Option(false));
     options.add("NNUEXMetrics", Option(false));
+#endif
 
     load_networks();
     resize_threads();
