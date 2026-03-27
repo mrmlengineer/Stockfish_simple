@@ -1629,8 +1629,14 @@ std::optional<Evaluation> Network::evaluate(const Position& pos) const {
         return std::nullopt;
 
     EncodedFen enc;
-    if (!encode_position_v2(pos, enc))
-        return std::nullopt;
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->encodePositionCalls;
+    {
+        ScopedRuntimeMetricTimer encodeTimer(metrics ? &metrics->encodePositionNs : nullptr);
+        if (!encode_position_v2(pos, enc))
+            return std::nullopt;
+    }
     return evaluate_encoded(*impl_, enc);
 }
 

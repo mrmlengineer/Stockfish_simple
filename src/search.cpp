@@ -139,6 +139,8 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.positionMoveProfile.dirtyThreatCalls += src.positionMoveProfile.dirtyThreatCalls;
     dst.positionMoveProfile.dirtyThreatNs += src.positionMoveProfile.dirtyThreatNs;
     dst.positionMoveProfile.dirtyThreatListEntries += src.positionMoveProfile.dirtyThreatListEntries;
+    dst.runtime.encodePositionCalls += src.runtime.encodePositionCalls;
+    dst.runtime.encodePositionNs += src.runtime.encodePositionNs;
     dst.runtime.h1ClipCalls += src.runtime.h1ClipCalls;
     dst.runtime.h1ClipNs += src.runtime.h1ClipNs;
     dst.runtime.postH1ForwardCalls += src.runtime.postH1ForwardCalls;
@@ -216,6 +218,8 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
       after.positionMoveProfile.dirtyThreatNs - before.positionMoveProfile.dirtyThreatNs;
     d.positionMoveProfile.dirtyThreatListEntries =
       after.positionMoveProfile.dirtyThreatListEntries - before.positionMoveProfile.dirtyThreatListEntries;
+    d.runtime.encodePositionCalls = after.runtime.encodePositionCalls - before.runtime.encodePositionCalls;
+    d.runtime.encodePositionNs = after.runtime.encodePositionNs - before.runtime.encodePositionNs;
     d.runtime.h1ClipCalls = after.runtime.h1ClipCalls - before.runtime.h1ClipCalls;
     d.runtime.h1ClipNs = after.runtime.h1ClipNs - before.runtime.h1ClipNs;
     d.runtime.postH1ForwardCalls = after.runtime.postH1ForwardCalls - before.runtime.postH1ForwardCalls;
@@ -760,6 +764,8 @@ void Search::Worker::start_searching() {
                   << " search_pos_dirty_threat_entries="
                   << metricsSearch.positionMoveProfile.dirtyThreatListEntries
                   << " search_parity_direct_eval_ns=" << metricsSearch.parityDirectEvalNs
+                  << " search_rt_encode_position_calls=" << metricsSearch.runtime.encodePositionCalls
+                  << " search_rt_encode_position_ns=" << metricsSearch.runtime.encodePositionNs
                   << " search_rt_h1_clip_calls=" << metricsSearch.runtime.h1ClipCalls
                   << " search_rt_h1_clip_ns=" << metricsSearch.runtime.h1ClipNs
                   << " search_rt_post_h1_forward_calls=" << metricsSearch.runtime.postH1ForwardCalls
@@ -825,6 +831,8 @@ void Search::Worker::start_searching() {
                   << " total_pos_dirty_threat_entries="
                   << metricsAfter.positionMoveProfile.dirtyThreatListEntries
                   << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs
+                  << " total_rt_encode_position_calls=" << metricsAfter.runtime.encodePositionCalls
+                  << " total_rt_encode_position_ns=" << metricsAfter.runtime.encodePositionNs
                   << " total_rt_h1_clip_calls=" << metricsAfter.runtime.h1ClipCalls
                   << " total_rt_h1_clip_ns=" << metricsAfter.runtime.h1ClipNs
                   << " total_rt_post_h1_forward_calls=" << metricsAfter.runtime.postH1ForwardCalls
