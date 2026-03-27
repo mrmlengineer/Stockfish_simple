@@ -95,6 +95,10 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.evalIncrementalRequested += src.evalIncrementalRequested;
     dst.evalIncrementalStateUsed += src.evalIncrementalStateUsed;
     dst.evalIncrementalStateMiss += src.evalIncrementalStateMiss;
+    dst.evalIncrementalTopMaterializeCalls += src.evalIncrementalTopMaterializeCalls;
+    dst.evalIncrementalTopDirectHits += src.evalIncrementalTopDirectHits;
+    dst.evalIncrementalTopReplayCalls += src.evalIncrementalTopReplayCalls;
+    dst.evalIncrementalTopReplaySteps += src.evalIncrementalTopReplaySteps;
     dst.evalIncrementalTopRebuildCalls += src.evalIncrementalTopRebuildCalls;
     dst.evalIncrementalTopRebuildFails += src.evalIncrementalTopRebuildFails;
     dst.wrapperCalls += src.wrapperCalls;
@@ -121,9 +125,14 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.parityMismatchRebuildFails += src.parityMismatchRebuildFails;
     dst.workerEvaluateNs += src.workerEvaluateNs;
     dst.wrapperEvalNs += src.wrapperEvalNs;
+    dst.evalIncrementalTopMaterializeNs += src.evalIncrementalTopMaterializeNs;
     dst.buildNs += src.buildNs;
     dst.advanceMoveNs += src.advanceMoveNs;
     dst.advanceNullNs += src.advanceNullNs;
+    dst.replayAdvanceMoveCalls += src.replayAdvanceMoveCalls;
+    dst.replayAdvanceMoveNs += src.replayAdvanceMoveNs;
+    dst.replayAdvanceNullCalls += src.replayAdvanceNullCalls;
+    dst.replayAdvanceNullNs += src.replayAdvanceNullNs;
     dst.doMoveNs += src.doMoveNs;
     dst.doNullMoveNs += src.doNullMoveNs;
     dst.undoMoveNs += src.undoMoveNs;
@@ -161,6 +170,14 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
     d.evalIncrementalRequested = after.evalIncrementalRequested - before.evalIncrementalRequested;
     d.evalIncrementalStateUsed = after.evalIncrementalStateUsed - before.evalIncrementalStateUsed;
     d.evalIncrementalStateMiss = after.evalIncrementalStateMiss - before.evalIncrementalStateMiss;
+    d.evalIncrementalTopMaterializeCalls =
+      after.evalIncrementalTopMaterializeCalls - before.evalIncrementalTopMaterializeCalls;
+    d.evalIncrementalTopDirectHits =
+      after.evalIncrementalTopDirectHits - before.evalIncrementalTopDirectHits;
+    d.evalIncrementalTopReplayCalls =
+      after.evalIncrementalTopReplayCalls - before.evalIncrementalTopReplayCalls;
+    d.evalIncrementalTopReplaySteps =
+      after.evalIncrementalTopReplaySteps - before.evalIncrementalTopReplaySteps;
     d.evalIncrementalTopRebuildCalls =
       after.evalIncrementalTopRebuildCalls - before.evalIncrementalTopRebuildCalls;
     d.evalIncrementalTopRebuildFails =
@@ -190,9 +207,15 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
     d.parityMismatchRebuildFails = after.parityMismatchRebuildFails - before.parityMismatchRebuildFails;
     d.workerEvaluateNs = after.workerEvaluateNs - before.workerEvaluateNs;
     d.wrapperEvalNs = after.wrapperEvalNs - before.wrapperEvalNs;
+    d.evalIncrementalTopMaterializeNs =
+      after.evalIncrementalTopMaterializeNs - before.evalIncrementalTopMaterializeNs;
     d.buildNs = after.buildNs - before.buildNs;
     d.advanceMoveNs = after.advanceMoveNs - before.advanceMoveNs;
     d.advanceNullNs = after.advanceNullNs - before.advanceNullNs;
+    d.replayAdvanceMoveCalls = after.replayAdvanceMoveCalls - before.replayAdvanceMoveCalls;
+    d.replayAdvanceMoveNs = after.replayAdvanceMoveNs - before.replayAdvanceMoveNs;
+    d.replayAdvanceNullCalls = after.replayAdvanceNullCalls - before.replayAdvanceNullCalls;
+    d.replayAdvanceNullNs = after.replayAdvanceNullNs - before.replayAdvanceNullNs;
     d.doMoveNs = after.doMoveNs - before.doMoveNs;
     d.doNullMoveNs = after.doNullMoveNs - before.doNullMoveNs;
     d.undoMoveNs = after.undoMoveNs - before.undoMoveNs;
@@ -530,6 +553,10 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
     auto&      net           = nnuex[numaAccessToken];
     const bool metricsEnabled = use_nnuex_metrics();
     auto&      top           = nnuexAccumulatorStack[nnuexAccumulatorSize - 1];
+    ScopedNsTimer materializeTimer(metricsEnabled ? &nnuexMetrics.evalIncrementalTopMaterializeNs : nullptr);
+
+    if (metricsEnabled)
+        ++nnuexMetrics.evalIncrementalTopMaterializeCalls;
 
     auto rebuild_top = [&]() {
         if (metricsEnabled)
@@ -553,6 +580,8 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
 
     if (top.computed && top.state.valid && top.state.key == pos.key())
     {
+        if (metricsEnabled)
+            ++nnuexMetrics.evalIncrementalTopDirectHits;
         inc = &top.state;
         return true;
     }
@@ -573,6 +602,12 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         return inc != nullptr;
     }
 
+    if (metricsEnabled)
+    {
+        ++nnuexMetrics.evalIncrementalTopReplayCalls;
+        nnuexMetrics.evalIncrementalTopReplaySteps += nnuexAccumulatorSize - begin;
+    }
+
     for (std::size_t idx = begin; idx < nnuexAccumulatorSize; ++idx)
     {
         const auto& prev = nnuexAccumulatorStack[idx - 1];
@@ -582,9 +617,13 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         if (next.isNull)
         {
             if (metricsEnabled)
+            {
                 ++nnuexMetrics.nullAdvanceCalls;
+                ++nnuexMetrics.replayAdvanceNullCalls;
+            }
             {
                 ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceNullNs : nullptr);
+                ScopedNsTimer replayTimer(metricsEnabled ? &nnuexMetrics.replayAdvanceNullNs : nullptr);
                 ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.stmBlack,
                                                                   next.state);
             }
@@ -594,9 +633,13 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         else
         {
             if (metricsEnabled)
+            {
                 ++nnuexMetrics.moveAdvanceCalls;
+                ++nnuexMetrics.replayAdvanceMoveCalls;
+            }
             {
                 ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceMoveNs : nullptr);
+                ScopedNsTimer replayTimer(metricsEnabled ? &nnuexMetrics.replayAdvanceMoveNs : nullptr);
                 ok = net.advance_incremental_state_from_meta(next.move, next.dirtyPiece, prev.state,
                                                              next.key, next.stmBlack, next.state);
             }
@@ -716,6 +759,11 @@ void Search::Worker::start_searching() {
                   << " search_eval_incremental_requested=" << metricsSearch.evalIncrementalRequested
                   << " search_eval_incremental_used=" << metricsSearch.evalIncrementalStateUsed
                   << " search_eval_incremental_miss=" << metricsSearch.evalIncrementalStateMiss
+                  << " search_eval_top_materialize_calls="
+                  << metricsSearch.evalIncrementalTopMaterializeCalls
+                  << " search_eval_top_direct_hits=" << metricsSearch.evalIncrementalTopDirectHits
+                  << " search_eval_top_replay_calls=" << metricsSearch.evalIncrementalTopReplayCalls
+                  << " search_eval_top_replay_steps=" << metricsSearch.evalIncrementalTopReplaySteps
                   << " search_eval_top_rebuild_calls=" << metricsSearch.evalIncrementalTopRebuildCalls
                   << " search_eval_top_rebuild_fails=" << metricsSearch.evalIncrementalTopRebuildFails
                   << " search_wrapper_calls=" << metricsSearch.wrapperCalls
@@ -743,9 +791,14 @@ void Search::Worker::start_searching() {
                   << " search_parity_mismatch_rebuild_fails=" << metricsSearch.parityMismatchRebuildFails
                   << " search_worker_eval_ns=" << metricsSearch.workerEvaluateNs
                   << " search_wrapper_eval_ns=" << metricsSearch.wrapperEvalNs
+                  << " search_eval_top_materialize_ns=" << metricsSearch.evalIncrementalTopMaterializeNs
                   << " search_build_ns=" << metricsSearch.buildNs
                   << " search_advance_move_ns=" << metricsSearch.advanceMoveNs
                   << " search_advance_null_ns=" << metricsSearch.advanceNullNs
+                  << " search_replay_advance_move_calls=" << metricsSearch.replayAdvanceMoveCalls
+                  << " search_replay_advance_move_ns=" << metricsSearch.replayAdvanceMoveNs
+                  << " search_replay_advance_null_calls=" << metricsSearch.replayAdvanceNullCalls
+                  << " search_replay_advance_null_ns=" << metricsSearch.replayAdvanceNullNs
                   << " search_do_move_ns=" << metricsSearch.doMoveNs
                   << " search_do_null_move_ns=" << metricsSearch.doNullMoveNs
                   << " search_undo_move_ns=" << metricsSearch.undoMoveNs
@@ -783,6 +836,11 @@ void Search::Worker::start_searching() {
                   << " total_eval_incremental_requested=" << metricsAfter.evalIncrementalRequested
                   << " total_eval_incremental_used=" << metricsAfter.evalIncrementalStateUsed
                   << " total_eval_incremental_miss=" << metricsAfter.evalIncrementalStateMiss
+                  << " total_eval_top_materialize_calls="
+                  << metricsAfter.evalIncrementalTopMaterializeCalls
+                  << " total_eval_top_direct_hits=" << metricsAfter.evalIncrementalTopDirectHits
+                  << " total_eval_top_replay_calls=" << metricsAfter.evalIncrementalTopReplayCalls
+                  << " total_eval_top_replay_steps=" << metricsAfter.evalIncrementalTopReplaySteps
                   << " total_eval_top_rebuild_calls=" << metricsAfter.evalIncrementalTopRebuildCalls
                   << " total_eval_top_rebuild_fails=" << metricsAfter.evalIncrementalTopRebuildFails
                   << " total_wrapper_calls=" << metricsAfter.wrapperCalls
@@ -810,9 +868,14 @@ void Search::Worker::start_searching() {
                   << " total_parity_mismatch_rebuild_fails=" << metricsAfter.parityMismatchRebuildFails
                   << " total_worker_eval_ns=" << metricsAfter.workerEvaluateNs
                   << " total_wrapper_eval_ns=" << metricsAfter.wrapperEvalNs
+                  << " total_eval_top_materialize_ns=" << metricsAfter.evalIncrementalTopMaterializeNs
                   << " total_build_ns=" << metricsAfter.buildNs
                   << " total_advance_move_ns=" << metricsAfter.advanceMoveNs
                   << " total_advance_null_ns=" << metricsAfter.advanceNullNs
+                  << " total_replay_advance_move_calls=" << metricsAfter.replayAdvanceMoveCalls
+                  << " total_replay_advance_move_ns=" << metricsAfter.replayAdvanceMoveNs
+                  << " total_replay_advance_null_calls=" << metricsAfter.replayAdvanceNullCalls
+                  << " total_replay_advance_null_ns=" << metricsAfter.replayAdvanceNullNs
                   << " total_do_move_ns=" << metricsAfter.doMoveNs
                   << " total_do_null_move_ns=" << metricsAfter.doNullMoveNs
                   << " total_undo_move_ns=" << metricsAfter.undoMoveNs

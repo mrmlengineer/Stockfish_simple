@@ -267,6 +267,10 @@ struct NNUEXMetrics {
     std::uint64_t evalIncrementalRequested         = 0;
     std::uint64_t evalIncrementalStateUsed         = 0;
     std::uint64_t evalIncrementalStateMiss         = 0;
+    std::uint64_t evalIncrementalTopMaterializeCalls = 0;
+    std::uint64_t evalIncrementalTopDirectHits       = 0;
+    std::uint64_t evalIncrementalTopReplayCalls      = 0;
+    std::uint64_t evalIncrementalTopReplaySteps      = 0;
     std::uint64_t evalIncrementalTopRebuildCalls   = 0;
     std::uint64_t evalIncrementalTopRebuildFails   = 0;
     std::uint64_t wrapperCalls                     = 0;
@@ -293,9 +297,14 @@ struct NNUEXMetrics {
     std::uint64_t parityMismatchRebuildFails       = 0;
     std::uint64_t workerEvaluateNs                 = 0;
     std::uint64_t wrapperEvalNs                    = 0;
+    std::uint64_t evalIncrementalTopMaterializeNs  = 0;
     std::uint64_t buildNs                          = 0;
     std::uint64_t advanceMoveNs                    = 0;
     std::uint64_t advanceNullNs                    = 0;
+    std::uint64_t replayAdvanceMoveCalls           = 0;
+    std::uint64_t replayAdvanceMoveNs              = 0;
+    std::uint64_t replayAdvanceNullCalls           = 0;
+    std::uint64_t replayAdvanceNullNs              = 0;
     std::uint64_t doMoveNs                         = 0;
     std::uint64_t doNullMoveNs                     = 0;
     std::uint64_t undoMoveNs                       = 0;
