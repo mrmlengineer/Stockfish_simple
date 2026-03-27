@@ -145,9 +145,6 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.positionMoveProfile.checkInfoNs += src.positionMoveProfile.checkInfoNs;
     dst.positionMoveProfile.repetitionCalls += src.positionMoveProfile.repetitionCalls;
     dst.positionMoveProfile.repetitionNs += src.positionMoveProfile.repetitionNs;
-    dst.positionMoveProfile.dirtyThreatCalls += src.positionMoveProfile.dirtyThreatCalls;
-    dst.positionMoveProfile.dirtyThreatNs += src.positionMoveProfile.dirtyThreatNs;
-    dst.positionMoveProfile.dirtyThreatListEntries += src.positionMoveProfile.dirtyThreatListEntries;
     dst.runtime.encodePositionCalls += src.runtime.encodePositionCalls;
     dst.runtime.encodePositionNs += src.runtime.encodePositionNs;
     dst.runtime.h1ClipCalls += src.runtime.h1ClipCalls;
@@ -235,12 +232,6 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
       after.positionMoveProfile.repetitionCalls - before.positionMoveProfile.repetitionCalls;
     d.positionMoveProfile.repetitionNs =
       after.positionMoveProfile.repetitionNs - before.positionMoveProfile.repetitionNs;
-    d.positionMoveProfile.dirtyThreatCalls =
-      after.positionMoveProfile.dirtyThreatCalls - before.positionMoveProfile.dirtyThreatCalls;
-    d.positionMoveProfile.dirtyThreatNs =
-      after.positionMoveProfile.dirtyThreatNs - before.positionMoveProfile.dirtyThreatNs;
-    d.positionMoveProfile.dirtyThreatListEntries =
-      after.positionMoveProfile.dirtyThreatListEntries - before.positionMoveProfile.dirtyThreatListEntries;
     d.runtime.encodePositionCalls = after.runtime.encodePositionCalls - before.runtime.encodePositionCalls;
     d.runtime.encodePositionNs = after.runtime.encodePositionNs - before.runtime.encodePositionNs;
     d.runtime.h1ClipCalls = after.runtime.h1ClipCalls - before.runtime.h1ClipCalls;
@@ -812,10 +803,6 @@ void Search::Worker::start_searching() {
                   << " search_pos_check_info_ns=" << metricsSearch.positionMoveProfile.checkInfoNs
                   << " search_pos_repetition_calls=" << metricsSearch.positionMoveProfile.repetitionCalls
                   << " search_pos_repetition_ns=" << metricsSearch.positionMoveProfile.repetitionNs
-                  << " search_pos_dirty_threat_calls=" << metricsSearch.positionMoveProfile.dirtyThreatCalls
-                  << " search_pos_dirty_threat_ns=" << metricsSearch.positionMoveProfile.dirtyThreatNs
-                  << " search_pos_dirty_threat_entries="
-                  << metricsSearch.positionMoveProfile.dirtyThreatListEntries
                   << " search_parity_direct_eval_ns=" << metricsSearch.parityDirectEvalNs
                   << " search_rt_encode_position_calls=" << metricsSearch.runtime.encodePositionCalls
                   << " search_rt_encode_position_ns=" << metricsSearch.runtime.encodePositionNs
@@ -889,10 +876,6 @@ void Search::Worker::start_searching() {
                   << " total_pos_check_info_ns=" << metricsAfter.positionMoveProfile.checkInfoNs
                   << " total_pos_repetition_calls=" << metricsAfter.positionMoveProfile.repetitionCalls
                   << " total_pos_repetition_ns=" << metricsAfter.positionMoveProfile.repetitionNs
-                  << " total_pos_dirty_threat_calls=" << metricsAfter.positionMoveProfile.dirtyThreatCalls
-                  << " total_pos_dirty_threat_ns=" << metricsAfter.positionMoveProfile.dirtyThreatNs
-                  << " total_pos_dirty_threat_entries="
-                  << metricsAfter.positionMoveProfile.dirtyThreatListEntries
                   << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs
                   << " total_rt_encode_position_calls=" << metricsAfter.runtime.encodePositionCalls
                   << " total_rt_encode_position_ns=" << metricsAfter.runtime.encodePositionNs
@@ -1255,7 +1238,7 @@ void Search::Worker::do_move(
         DirtyPiece& dirtyPiece = nnuexDiffs.push();
         ScopedPositionMoveProfileBinding positionMoveProfileBinding(
           samplePositionMoveProfile ? &nnuexMetrics.positionMoveProfile : nullptr);
-        pos.do_move(move, st, givesCheck, dirtyPiece, nullptr, &tt, &sharedHistory);
+        pos.do_move(move, st, givesCheck, dirtyPiece, &tt, &sharedHistory);
         push_nnuex_incremental_move(pos, move, dirtyPiece);
 
         if (ss != nullptr)
@@ -1274,7 +1257,7 @@ void Search::Worker::do_move(
     nodes.store(nodes.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 
     DirtyPiece& dirtyPiece = nnuexDiffs.push();
-    pos.do_move(move, st, givesCheck, dirtyPiece, nullptr, &tt, &sharedHistory);
+    pos.do_move(move, st, givesCheck, dirtyPiece, &tt, &sharedHistory);
     push_nnuex_incremental_move(pos, move, dirtyPiece);
 
     if (ss != nullptr)

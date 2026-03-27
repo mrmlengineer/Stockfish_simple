@@ -291,49 +291,6 @@ struct DirtyPiece {
     Piece  remove_pc, add_pc;
 };
 
-// Keep track of inherited engine-core threat deltas. The active NNUEX runtime
-// does not consume threat features, but Position still populates this data.
-struct DirtyThreat {
-    static constexpr int PcSqOffset         = 0;
-    static constexpr int ThreatenedSqOffset = 8;
-    static constexpr int ThreatenedPcOffset = 16;
-    static constexpr int PcOffset           = 20;
-
-    DirtyThreat() { /* don't initialize data */ }
-    DirtyThreat(uint32_t raw) :
-        data(raw) {}
-    DirtyThreat(Piece pc, Piece threatened_pc, Square pc_sq, Square threatened_sq, bool add) {
-        data = (uint32_t(add) << 31) | (pc << PcOffset) | (threatened_pc << ThreatenedPcOffset)
-             | (threatened_sq << ThreatenedSqOffset) | (pc_sq << PcSqOffset);
-    }
-
-    Piece  pc() const { return static_cast<Piece>(data >> PcOffset & 0xf); }
-    Piece  threatened_pc() const { return static_cast<Piece>(data >> ThreatenedPcOffset & 0xf); }
-    Square threatened_sq() const { return static_cast<Square>(data >> ThreatenedSqOffset & 0xff); }
-    Square pc_sq() const { return static_cast<Square>(data >> PcSqOffset & 0xff); }
-    bool   add() const { return data >> 31; }
-    uint32_t raw() const { return data; }
-
-   private:
-    uint32_t data;
-};
-
-// In the inherited threat-delta encoding, a piece can be involved in at most
-// 8 outgoing attacks and 16 incoming attacks. Moving a piece also can reveal
-// at most 8 discovered attacks. This makes 80 a safe upper bound for a
-// non-castling move and 36 for castling. The extra 16 entries accommodate
-// unmasked vector stores near the end of the list.
-
-using DirtyThreatList = ValueList<DirtyThreat, 96>;
-
-struct DirtyThreats {
-    DirtyThreatList list;
-    Color           us;
-    Square          prevKsq, ksq;
-
-    Bitboard threatenedSqs, threateningSqs;
-};
-
     #define ENABLE_INCR_OPERATORS_ON(T) \
         constexpr T& operator++(T& d) { return d = T(int(d) + 1); } \
         constexpr T& operator--(T& d) { return d = T(int(d) - 1); }
