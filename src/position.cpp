@@ -737,7 +737,7 @@ void Position::do_move(Move                      m,
                        StateInfo&                newSt,
                        bool                      givesCheck,
                        DirtyPiece&               dp,
-                       DirtyThreats&             dts,
+                       DirtyThreats*             dts,
                        const TranspositionTable* tt      = nullptr,
                        const SharedHistories*    history = nullptr) {
 
@@ -781,9 +781,12 @@ void Position::do_move(Move                      m,
     dp.from           = from;
     dp.to             = to;
     dp.add_sq         = SQ_NONE;
-    dts.us            = us;
-    dts.prevKsq       = square<KING>(us);
-    dts.threatenedSqs = dts.threateningSqs = 0;
+    if (dts)
+    {
+        dts->us            = us;
+        dts->prevKsq       = square<KING>(us);
+        dts->threatenedSqs = dts->threateningSqs = 0;
+    }
 
     assert(color_of(pc) == us);
     assert(captured == NO_PIECE || color_of(captured) == (m.type_of() != CASTLING ? them : us));
@@ -795,7 +798,7 @@ void Position::do_move(Move                      m,
         assert(captured == make_piece(us, ROOK));
 
         Square rfrom, rto;
-        do_castling<true>(us, from, to, rfrom, rto, &dts, &dp);
+        do_castling<true>(us, from, to, rfrom, rto, dts, &dp);
 
         k ^= Zobrist::psq[captured][rfrom] ^ Zobrist::psq[captured][rto];
         st->nonPawnKey[us] ^= Zobrist::psq[captured][rfrom] ^ Zobrist::psq[captured][rto];
@@ -820,7 +823,7 @@ void Position::do_move(Move                      m,
                 assert(piece_on(capsq) == make_piece(them, PAWN));
 
                 // Update board and piece lists in ep case, normal captures are updated later
-                remove_piece(capsq, &dts);
+                remove_piece(capsq, dts);
             }
 
             st->pawnKey ^= Zobrist::psq[captured][capsq];
@@ -870,11 +873,11 @@ void Position::do_move(Move                      m,
     {
         if (captured && m.type_of() != EN_PASSANT)
         {
-            remove_piece(from, &dts);
-            swap_piece(to, pc, &dts);
+            remove_piece(from, dts);
+            swap_piece(to, pc, dts);
         }
         else
-            move_piece(from, to, &dts);
+            move_piece(from, to, dts);
     }
 
     // If the moving piece is a pawn do some special extra work
@@ -892,7 +895,7 @@ void Position::do_move(Move                      m,
             assert(relative_rank(us, to) == RANK_8);
             assert(type_of(promotion) >= KNIGHT && type_of(promotion) <= QUEEN);
 
-            swap_piece(to, promotion, &dts);
+            swap_piece(to, promotion, dts);
 
             dp.add_pc = promotion;
             dp.add_sq = to;
@@ -1037,12 +1040,13 @@ void Position::do_move(Move                      m,
         }
     }
 
-    if (profile)
+    if (profile && dts)
     {
-        profile->dirtyThreatListEntries += dts.list.size();
+        profile->dirtyThreatListEntries += dts->list.size();
     }
 
-    dts.ksq = square<KING>(us);
+    if (dts)
+        dts->ksq = square<KING>(us);
 
     assert(pos_is_ok());
 

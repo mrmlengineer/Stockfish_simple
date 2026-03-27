@@ -436,8 +436,8 @@ class Worker {
         bool                          isNull   = false;
     };
 
-    // NNUEX ignores threat deltas, but Position still fills this scratch buffer during move application.
-    DirtyThreats                                          nnuexScratchThreats{};
+    // NNUEX does not consume threat deltas; passing nullptr to do_move bypasses
+    // DirtyThreats computation entirely.
     // Used by NNUEX
     Eval::NNUEX::PieceDiffStack<>                         nnuexDiffs;
     static constexpr std::size_t                          nnuexAccumulatorCapacity = std::size_t(MAX_PLY) + 1;

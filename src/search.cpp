@@ -1253,10 +1253,9 @@ void Search::Worker::do_move(
         const bool samplePositionMoveProfile = (nodeCount & kPositionMoveProfileSampleMask) == 0;
 
         DirtyPiece& dirtyPiece = nnuexDiffs.push();
-        new (&nnuexScratchThreats) DirtyThreats;
         ScopedPositionMoveProfileBinding positionMoveProfileBinding(
           samplePositionMoveProfile ? &nnuexMetrics.positionMoveProfile : nullptr);
-        pos.do_move(move, st, givesCheck, dirtyPiece, nnuexScratchThreats, &tt, &sharedHistory);
+        pos.do_move(move, st, givesCheck, dirtyPiece, nullptr, &tt, &sharedHistory);
         push_nnuex_incremental_move(pos, move, dirtyPiece);
 
         if (ss != nullptr)
@@ -1275,8 +1274,7 @@ void Search::Worker::do_move(
     nodes.store(nodes.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 
     DirtyPiece& dirtyPiece = nnuexDiffs.push();
-    new (&nnuexScratchThreats) DirtyThreats;
-    pos.do_move(move, st, givesCheck, dirtyPiece, nnuexScratchThreats, &tt, &sharedHistory);
+    pos.do_move(move, st, givesCheck, dirtyPiece, nullptr, &tt, &sharedHistory);
     push_nnuex_incremental_move(pos, move, dirtyPiece);
 
     if (ss != nullptr)
