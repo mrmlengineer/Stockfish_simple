@@ -110,6 +110,10 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.nullAdvanceFails += src.nullAdvanceFails;
     dst.nullFallbackBuildCalls += src.nullFallbackBuildCalls;
     dst.nullFallbackBuildFails += src.nullFallbackBuildFails;
+    dst.doMoveCalls += src.doMoveCalls;
+    dst.doNullMoveCalls += src.doNullMoveCalls;
+    dst.undoMoveCalls += src.undoMoveCalls;
+    dst.undoNullMoveCalls += src.undoNullMoveCalls;
     dst.parityExtraIncEvalCalls += src.parityExtraIncEvalCalls;
     dst.parityExtraFullEvalCalls += src.parityExtraFullEvalCalls;
     dst.parityMismatchFallbackFullCalls += src.parityMismatchFallbackFullCalls;
@@ -120,7 +124,21 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.buildNs += src.buildNs;
     dst.advanceMoveNs += src.advanceMoveNs;
     dst.advanceNullNs += src.advanceNullNs;
+    dst.doMoveNs += src.doMoveNs;
+    dst.doNullMoveNs += src.doNullMoveNs;
+    dst.undoMoveNs += src.undoMoveNs;
+    dst.undoNullMoveNs += src.undoNullMoveNs;
     dst.parityDirectEvalNs += src.parityDirectEvalNs;
+    dst.positionMoveProfile.sampledDoMoveCalls += src.positionMoveProfile.sampledDoMoveCalls;
+    dst.positionMoveProfile.stateCopyCalls += src.positionMoveProfile.stateCopyCalls;
+    dst.positionMoveProfile.stateCopyNs += src.positionMoveProfile.stateCopyNs;
+    dst.positionMoveProfile.checkInfoCalls += src.positionMoveProfile.checkInfoCalls;
+    dst.positionMoveProfile.checkInfoNs += src.positionMoveProfile.checkInfoNs;
+    dst.positionMoveProfile.repetitionCalls += src.positionMoveProfile.repetitionCalls;
+    dst.positionMoveProfile.repetitionNs += src.positionMoveProfile.repetitionNs;
+    dst.positionMoveProfile.dirtyThreatCalls += src.positionMoveProfile.dirtyThreatCalls;
+    dst.positionMoveProfile.dirtyThreatNs += src.positionMoveProfile.dirtyThreatNs;
+    dst.positionMoveProfile.dirtyThreatListEntries += src.positionMoveProfile.dirtyThreatListEntries;
     dst.runtime.h1ClipCalls += src.runtime.h1ClipCalls;
     dst.runtime.h1ClipNs += src.runtime.h1ClipNs;
     dst.runtime.postH1ForwardCalls += src.runtime.postH1ForwardCalls;
@@ -158,6 +176,10 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
     d.nullAdvanceFails = after.nullAdvanceFails - before.nullAdvanceFails;
     d.nullFallbackBuildCalls = after.nullFallbackBuildCalls - before.nullFallbackBuildCalls;
     d.nullFallbackBuildFails = after.nullFallbackBuildFails - before.nullFallbackBuildFails;
+    d.doMoveCalls = after.doMoveCalls - before.doMoveCalls;
+    d.doNullMoveCalls = after.doNullMoveCalls - before.doNullMoveCalls;
+    d.undoMoveCalls = after.undoMoveCalls - before.undoMoveCalls;
+    d.undoNullMoveCalls = after.undoNullMoveCalls - before.undoNullMoveCalls;
     d.parityExtraIncEvalCalls = after.parityExtraIncEvalCalls - before.parityExtraIncEvalCalls;
     d.parityExtraFullEvalCalls = after.parityExtraFullEvalCalls - before.parityExtraFullEvalCalls;
     d.parityMismatchFallbackFullCalls =
@@ -169,7 +191,31 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
     d.buildNs = after.buildNs - before.buildNs;
     d.advanceMoveNs = after.advanceMoveNs - before.advanceMoveNs;
     d.advanceNullNs = after.advanceNullNs - before.advanceNullNs;
+    d.doMoveNs = after.doMoveNs - before.doMoveNs;
+    d.doNullMoveNs = after.doNullMoveNs - before.doNullMoveNs;
+    d.undoMoveNs = after.undoMoveNs - before.undoMoveNs;
+    d.undoNullMoveNs = after.undoNullMoveNs - before.undoNullMoveNs;
     d.parityDirectEvalNs = after.parityDirectEvalNs - before.parityDirectEvalNs;
+    d.positionMoveProfile.sampledDoMoveCalls =
+      after.positionMoveProfile.sampledDoMoveCalls - before.positionMoveProfile.sampledDoMoveCalls;
+    d.positionMoveProfile.stateCopyCalls =
+      after.positionMoveProfile.stateCopyCalls - before.positionMoveProfile.stateCopyCalls;
+    d.positionMoveProfile.stateCopyNs =
+      after.positionMoveProfile.stateCopyNs - before.positionMoveProfile.stateCopyNs;
+    d.positionMoveProfile.checkInfoCalls =
+      after.positionMoveProfile.checkInfoCalls - before.positionMoveProfile.checkInfoCalls;
+    d.positionMoveProfile.checkInfoNs =
+      after.positionMoveProfile.checkInfoNs - before.positionMoveProfile.checkInfoNs;
+    d.positionMoveProfile.repetitionCalls =
+      after.positionMoveProfile.repetitionCalls - before.positionMoveProfile.repetitionCalls;
+    d.positionMoveProfile.repetitionNs =
+      after.positionMoveProfile.repetitionNs - before.positionMoveProfile.repetitionNs;
+    d.positionMoveProfile.dirtyThreatCalls =
+      after.positionMoveProfile.dirtyThreatCalls - before.positionMoveProfile.dirtyThreatCalls;
+    d.positionMoveProfile.dirtyThreatNs =
+      after.positionMoveProfile.dirtyThreatNs - before.positionMoveProfile.dirtyThreatNs;
+    d.positionMoveProfile.dirtyThreatListEntries =
+      after.positionMoveProfile.dirtyThreatListEntries - before.positionMoveProfile.dirtyThreatListEntries;
     d.runtime.h1ClipCalls = after.runtime.h1ClipCalls - before.runtime.h1ClipCalls;
     d.runtime.h1ClipNs = after.runtime.h1ClipNs - before.runtime.h1ClipNs;
     d.runtime.postH1ForwardCalls = after.runtime.postH1ForwardCalls - before.runtime.postH1ForwardCalls;
@@ -603,6 +649,7 @@ void Search::Worker::start_searching() {
         return totals;
     };
     const NNUEXMetrics metricsBefore = metricsSummaryEnabled ? metrics_totals() : NNUEXMetrics{};
+    const std::uint64_t nodesBefore  = metricsSummaryEnabled ? threads.nodes_searched() : 0;
 
     // Non-main threads go directly to iterative_deepening()
     if (!is_mainthread())
@@ -654,9 +701,13 @@ void Search::Worker::start_searching() {
 
     if (metricsSummaryEnabled)
     {
+        const std::uint64_t nodesAfter   = threads.nodes_searched();
+        const std::uint64_t nodesSearch  = nodesAfter - nodesBefore;
         const NNUEXMetrics metricsAfter  = metrics_totals();
         const NNUEXMetrics metricsSearch = diff_nnuex_metrics(metricsAfter, metricsBefore);
+        constexpr std::uint64_t kPositionMoveProfileSamplePeriod = 256;
         sync_cout << "info string NNUEX metrics summary"
+                  << " search_nodes=" << nodesSearch
                   << " search_eval_calls=" << metricsSearch.evalCalls
                   << " search_eval_incremental_requested=" << metricsSearch.evalIncrementalRequested
                   << " search_eval_incremental_used=" << metricsSearch.evalIncrementalStateUsed
@@ -676,6 +727,10 @@ void Search::Worker::start_searching() {
                   << " search_null_advance_fails=" << metricsSearch.nullAdvanceFails
                   << " search_null_fallback_build_calls=" << metricsSearch.nullFallbackBuildCalls
                   << " search_null_fallback_build_fails=" << metricsSearch.nullFallbackBuildFails
+                  << " search_do_move_calls=" << metricsSearch.doMoveCalls
+                  << " search_do_null_move_calls=" << metricsSearch.doNullMoveCalls
+                  << " search_undo_move_calls=" << metricsSearch.undoMoveCalls
+                  << " search_undo_null_move_calls=" << metricsSearch.undoNullMoveCalls
                   << " search_parity_extra_inc_eval_calls=" << metricsSearch.parityExtraIncEvalCalls
                   << " search_parity_extra_full_eval_calls=" << metricsSearch.parityExtraFullEvalCalls
                   << " search_parity_mismatch_fallback_full_calls="
@@ -687,6 +742,23 @@ void Search::Worker::start_searching() {
                   << " search_build_ns=" << metricsSearch.buildNs
                   << " search_advance_move_ns=" << metricsSearch.advanceMoveNs
                   << " search_advance_null_ns=" << metricsSearch.advanceNullNs
+                  << " search_do_move_ns=" << metricsSearch.doMoveNs
+                  << " search_do_null_move_ns=" << metricsSearch.doNullMoveNs
+                  << " search_undo_move_ns=" << metricsSearch.undoMoveNs
+                  << " search_undo_null_move_ns=" << metricsSearch.undoNullMoveNs
+                  << " search_pos_sampled_do_move_calls="
+                  << metricsSearch.positionMoveProfile.sampledDoMoveCalls
+                  << " search_pos_sample_period=" << kPositionMoveProfileSamplePeriod
+                  << " search_pos_state_copy_calls=" << metricsSearch.positionMoveProfile.stateCopyCalls
+                  << " search_pos_state_copy_ns=" << metricsSearch.positionMoveProfile.stateCopyNs
+                  << " search_pos_check_info_calls=" << metricsSearch.positionMoveProfile.checkInfoCalls
+                  << " search_pos_check_info_ns=" << metricsSearch.positionMoveProfile.checkInfoNs
+                  << " search_pos_repetition_calls=" << metricsSearch.positionMoveProfile.repetitionCalls
+                  << " search_pos_repetition_ns=" << metricsSearch.positionMoveProfile.repetitionNs
+                  << " search_pos_dirty_threat_calls=" << metricsSearch.positionMoveProfile.dirtyThreatCalls
+                  << " search_pos_dirty_threat_ns=" << metricsSearch.positionMoveProfile.dirtyThreatNs
+                  << " search_pos_dirty_threat_entries="
+                  << metricsSearch.positionMoveProfile.dirtyThreatListEntries
                   << " search_parity_direct_eval_ns=" << metricsSearch.parityDirectEvalNs
                   << " search_rt_h1_clip_calls=" << metricsSearch.runtime.h1ClipCalls
                   << " search_rt_h1_clip_ns=" << metricsSearch.runtime.h1ClipNs
@@ -700,6 +772,7 @@ void Search::Worker::start_searching() {
                   << " search_rt_advance_move_preclip_ns=" << metricsSearch.runtime.advanceMovePreClipNs
                   << " search_rt_advance_null_preclip_calls=" << metricsSearch.runtime.advanceNullPreClipCalls
                   << " search_rt_advance_null_preclip_ns=" << metricsSearch.runtime.advanceNullPreClipNs
+                  << " total_nodes=" << nodesAfter
                   << " total_eval_calls=" << metricsAfter.evalCalls
                   << " total_eval_incremental_requested=" << metricsAfter.evalIncrementalRequested
                   << " total_eval_incremental_used=" << metricsAfter.evalIncrementalStateUsed
@@ -719,6 +792,10 @@ void Search::Worker::start_searching() {
                   << " total_null_advance_fails=" << metricsAfter.nullAdvanceFails
                   << " total_null_fallback_build_calls=" << metricsAfter.nullFallbackBuildCalls
                   << " total_null_fallback_build_fails=" << metricsAfter.nullFallbackBuildFails
+                  << " total_do_move_calls=" << metricsAfter.doMoveCalls
+                  << " total_do_null_move_calls=" << metricsAfter.doNullMoveCalls
+                  << " total_undo_move_calls=" << metricsAfter.undoMoveCalls
+                  << " total_undo_null_move_calls=" << metricsAfter.undoNullMoveCalls
                   << " total_parity_extra_inc_eval_calls=" << metricsAfter.parityExtraIncEvalCalls
                   << " total_parity_extra_full_eval_calls=" << metricsAfter.parityExtraFullEvalCalls
                   << " total_parity_mismatch_fallback_full_calls="
@@ -730,6 +807,23 @@ void Search::Worker::start_searching() {
                   << " total_build_ns=" << metricsAfter.buildNs
                   << " total_advance_move_ns=" << metricsAfter.advanceMoveNs
                   << " total_advance_null_ns=" << metricsAfter.advanceNullNs
+                  << " total_do_move_ns=" << metricsAfter.doMoveNs
+                  << " total_do_null_move_ns=" << metricsAfter.doNullMoveNs
+                  << " total_undo_move_ns=" << metricsAfter.undoMoveNs
+                  << " total_undo_null_move_ns=" << metricsAfter.undoNullMoveNs
+                  << " total_pos_sampled_do_move_calls="
+                  << metricsAfter.positionMoveProfile.sampledDoMoveCalls
+                  << " total_pos_sample_period=" << kPositionMoveProfileSamplePeriod
+                  << " total_pos_state_copy_calls=" << metricsAfter.positionMoveProfile.stateCopyCalls
+                  << " total_pos_state_copy_ns=" << metricsAfter.positionMoveProfile.stateCopyNs
+                  << " total_pos_check_info_calls=" << metricsAfter.positionMoveProfile.checkInfoCalls
+                  << " total_pos_check_info_ns=" << metricsAfter.positionMoveProfile.checkInfoNs
+                  << " total_pos_repetition_calls=" << metricsAfter.positionMoveProfile.repetitionCalls
+                  << " total_pos_repetition_ns=" << metricsAfter.positionMoveProfile.repetitionNs
+                  << " total_pos_dirty_threat_calls=" << metricsAfter.positionMoveProfile.dirtyThreatCalls
+                  << " total_pos_dirty_threat_ns=" << metricsAfter.positionMoveProfile.dirtyThreatNs
+                  << " total_pos_dirty_threat_entries="
+                  << metricsAfter.positionMoveProfile.dirtyThreatListEntries
                   << " total_parity_direct_eval_ns=" << metricsAfter.parityDirectEvalNs
                   << " total_rt_h1_clip_calls=" << metricsAfter.runtime.h1ClipCalls
                   << " total_rt_h1_clip_ns=" << metricsAfter.runtime.h1ClipNs
@@ -1074,6 +1168,37 @@ void Search::Worker::do_move(Position& pos, const Move move, StateInfo& st, Stac
 
 void Search::Worker::do_move(
   Position& pos, const Move move, StateInfo& st, const bool givesCheck, Stack* const ss) {
+    const bool metricsEnabled = use_nnuex_metrics();
+    if (metricsEnabled)
+    {
+        ++nnuexMetrics.doMoveCalls;
+        ScopedNsTimer timer(&nnuexMetrics.doMoveNs);
+
+        bool capture = pos.capture_stage(move);
+        // Preferable over fetch_add to avoid locking instructions
+        const auto nodeCount = nodes.load(std::memory_order_relaxed) + 1;
+        nodes.store(nodeCount, std::memory_order_relaxed);
+        constexpr std::uint64_t kPositionMoveProfileSampleMask = 0xFF;
+        const bool samplePositionMoveProfile = (nodeCount & kPositionMoveProfileSampleMask) == 0;
+
+        DirtyPiece& dirtyPiece = nnuexDiffs.push();
+        new (&nnuexScratchThreats) DirtyThreats;
+        ScopedPositionMoveProfileBinding positionMoveProfileBinding(
+          samplePositionMoveProfile ? &nnuexMetrics.positionMoveProfile : nullptr);
+        pos.do_move(move, st, givesCheck, dirtyPiece, nnuexScratchThreats, &tt, &sharedHistory);
+        push_nnuex_incremental_move(pos, move, dirtyPiece);
+
+        if (ss != nullptr)
+        {
+            ss->currentMove = move;
+            ss->continuationHistory =
+              &continuationHistory[ss->inCheck][capture][dirtyPiece.pc][move.to_sq()];
+            ss->continuationCorrectionHistory =
+              &continuationCorrectionHistory[dirtyPiece.pc][move.to_sq()];
+        }
+        return;
+    }
+
     bool capture = pos.capture_stage(move);
     // Preferable over fetch_add to avoid locking instructions
     nodes.store(nodes.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
@@ -1094,6 +1219,19 @@ void Search::Worker::do_move(
 }
 
 void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss) {
+    const bool metricsEnabled = use_nnuex_metrics();
+    if (metricsEnabled)
+    {
+        ++nnuexMetrics.doNullMoveCalls;
+        ScopedNsTimer timer(&nnuexMetrics.doNullMoveNs);
+        pos.do_null_move(st, tt);
+        push_nnuex_incremental_null(pos);
+        ss->currentMove                   = Move::null();
+        ss->continuationHistory           = &continuationHistory[0][0][NO_PIECE][0];
+        ss->continuationCorrectionHistory = &continuationCorrectionHistory[NO_PIECE][0];
+        return;
+    }
+
     pos.do_null_move(st, tt);
     push_nnuex_incremental_null(pos);
     ss->currentMove                   = Move::null();
@@ -1102,6 +1240,18 @@ void Search::Worker::do_null_move(Position& pos, StateInfo& st, Stack* const ss)
 }
 
 void Search::Worker::undo_move(Position& pos, const Move move) {
+    const bool metricsEnabled = use_nnuex_metrics();
+    if (metricsEnabled)
+    {
+        ++nnuexMetrics.undoMoveCalls;
+        ScopedNsTimer timer(&nnuexMetrics.undoMoveNs);
+        pos.undo_move(move);
+        nnuexDiffs.pop();
+        (void) move;
+        pop_nnuex_incremental();
+        return;
+    }
+
     pos.undo_move(move);
     nnuexDiffs.pop();
     (void) move;
@@ -1109,6 +1259,16 @@ void Search::Worker::undo_move(Position& pos, const Move move) {
 }
 
 void Search::Worker::undo_null_move(Position& pos) {
+    const bool metricsEnabled = use_nnuex_metrics();
+    if (metricsEnabled)
+    {
+        ++nnuexMetrics.undoNullMoveCalls;
+        ScopedNsTimer timer(&nnuexMetrics.undoNullMoveNs);
+        pos.undo_null_move();
+        pop_nnuex_incremental();
+        return;
+    }
+
     pos.undo_null_move();
     pop_nnuex_incremental();
 }

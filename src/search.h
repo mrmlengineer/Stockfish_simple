@@ -282,6 +282,10 @@ struct NNUEXMetrics {
     std::uint64_t nullAdvanceFails                 = 0;
     std::uint64_t nullFallbackBuildCalls           = 0;
     std::uint64_t nullFallbackBuildFails           = 0;
+    std::uint64_t doMoveCalls                      = 0;
+    std::uint64_t doNullMoveCalls                  = 0;
+    std::uint64_t undoMoveCalls                    = 0;
+    std::uint64_t undoNullMoveCalls                = 0;
     std::uint64_t parityExtraIncEvalCalls          = 0;
     std::uint64_t parityExtraFullEvalCalls         = 0;
     std::uint64_t parityMismatchFallbackFullCalls  = 0;
@@ -292,7 +296,12 @@ struct NNUEXMetrics {
     std::uint64_t buildNs                          = 0;
     std::uint64_t advanceMoveNs                    = 0;
     std::uint64_t advanceNullNs                    = 0;
+    std::uint64_t doMoveNs                         = 0;
+    std::uint64_t doNullMoveNs                     = 0;
+    std::uint64_t undoMoveNs                       = 0;
+    std::uint64_t undoNullMoveNs                   = 0;
     std::uint64_t parityDirectEvalNs               = 0;
+    PositionMoveProfileMetrics positionMoveProfile{};
     Eval::NNUEX::RuntimeMetrics runtime{};
 };
 
