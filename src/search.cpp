@@ -551,7 +551,6 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
     auto&      net           = nnuex[numaAccessToken];
     const bool metricsEnabled = use_nnuex_metrics();
     auto&      top           = nnuexAccumulatorStack[nnuexAccumulatorSize - 1];
-    ScopedNsTimer materializeTimer(metricsEnabled ? &nnuexMetrics.evalIncrementalTopMaterializeNs : nullptr);
 
     if (metricsEnabled)
         ++nnuexMetrics.evalIncrementalTopMaterializeCalls;
@@ -559,11 +558,7 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
     auto rebuild_top = [&]() {
         if (metricsEnabled)
             ++nnuexMetrics.evalIncrementalTopRebuildCalls;
-        bool rebuilt = false;
-        {
-            ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.buildNs : nullptr);
-            rebuilt = net.build_incremental_state(pos, top.state);
-        }
+        const bool rebuilt = net.build_incremental_state(pos, top.state);
         top.key      = pos.key();
         top.stmBlack = pos.side_to_move() == BLACK ? 1 : 0;
         top.computed = rebuilt && top.state.valid && top.state.key == top.key;
@@ -585,15 +580,12 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
     }
 
     std::size_t begin = nnuexAccumulatorSize;
+    while (begin > 0)
     {
-        ScopedNsTimer stackWalkTimer(metricsEnabled ? &nnuexMetrics.materializeStackWalkNs : nullptr);
-        while (begin > 0)
-        {
-            const auto& entry = nnuexAccumulatorStack[begin - 1];
-            if (entry.computed && entry.state.valid && entry.state.key == entry.key)
-                break;
-            --begin;
-        }
+        const auto& entry = nnuexAccumulatorStack[begin - 1];
+        if (entry.computed && entry.state.valid && entry.state.key == entry.key)
+            break;
+        --begin;
     }
 
     if (begin == 0)
@@ -609,8 +601,6 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         nnuexMetrics.evalIncrementalTopReplaySteps += nnuexAccumulatorSize - begin;
     }
 
-    {
-    ScopedNsTimer replayLoopTimer(metricsEnabled ? &nnuexMetrics.replayLoopNs : nullptr);
     for (std::size_t idx = begin; idx < nnuexAccumulatorSize; ++idx)
     {
         const auto& prev = nnuexAccumulatorStack[idx - 1];
@@ -624,12 +614,8 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 ++nnuexMetrics.nullAdvanceCalls;
                 ++nnuexMetrics.replayAdvanceNullCalls;
             }
-            {
-                ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceNullNs : nullptr);
-                ScopedNsTimer replayTimer(metricsEnabled ? &nnuexMetrics.replayAdvanceNullNs : nullptr);
-                ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.stmBlack,
-                                                                  next.state);
-            }
+            ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.stmBlack,
+                                                              next.state);
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.nullAdvanceFails;
         }
@@ -640,12 +626,8 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 ++nnuexMetrics.moveAdvanceCalls;
                 ++nnuexMetrics.replayAdvanceMoveCalls;
             }
-            {
-                ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceMoveNs : nullptr);
-                ScopedNsTimer replayTimer(metricsEnabled ? &nnuexMetrics.replayAdvanceMoveNs : nullptr);
-                ok = net.advance_incremental_state_from_meta(next.move, next.dirtyPiece, prev.state,
-                                                             next.key, next.stmBlack, next.state);
-            }
+            ok = net.advance_incremental_state_from_meta(next.move, next.dirtyPiece, prev.state,
+                                                         next.key, next.stmBlack, next.state);
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.moveAdvanceFails;
         }
@@ -658,7 +640,6 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 inc = &top.state;
             return inc != nullptr;
         }
-    }
     }
 
     if (top.computed && top.state.valid && top.state.key == pos.key())
