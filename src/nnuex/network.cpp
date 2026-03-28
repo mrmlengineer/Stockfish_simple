@@ -109,6 +109,16 @@ ScopedRuntimeMetricsBinding::ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) n
 ScopedRuntimeMetricsBinding::~ScopedRuntimeMetricsBinding() noexcept { gRuntimeMetricsSink = prev_; }
 #endif
 
+// Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
+static int log2_power_of_two(std::int32_t x) {
+    if (x <= 0 || (x & (x - 1)) != 0)
+        return 0;
+    int s = 0;
+    while ((1 << s) < x)
+        ++s;
+    return s;
+}
+
 namespace {
 
 inline float clip01(float x) {
@@ -151,30 +161,26 @@ void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
         return;
     }
 
+    // denom is validated as power-of-two at load time; use integer shift.
+    const int shift = log2_power_of_two(denom);
+
     const __m256i zero32    = _mm256_setzero_si256();
-    const __m256d denomD    = _mm256_set1_pd(double(denom));
-    const __m256d halfD     = _mm256_set1_pd(double(denom / 2));
-    const __m256d zeroD     = _mm256_setzero_pd();
-    const __m256d hiddenQD  = _mm256_set1_pd(double(hiddenQuantizedOne));
+    const __m256i half32    = _mm256_set1_epi32(denom / 2);
+    const __m128i shift128  = _mm_cvtsi32_si128(shift);
+    const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
 
     for (std::size_t j = 0; j < count; j += 8)
     {
         const __m256i x32    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + j));
-        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);
+        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);           // ReLU
+        const __m256i biased = _mm256_add_epi32(xPos32, half32);        // + denom/2
+        const __m256i q32    = _mm256_srl_epi32(biased, shift128);      // >> shift
+        const __m256i clamped = _mm256_min_epu32(q32, hiddenQ32);       // clamp
 
-        const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
-        const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
-
-        __m256d qLo = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosLo), halfD), denomD);
-        __m256d qHi = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosHi), halfD), denomD);
-
-        qLo = _mm256_min_pd(_mm256_max_pd(qLo, zeroD), hiddenQD);
-        qHi = _mm256_min_pd(_mm256_max_pd(qHi, zeroD), hiddenQD);
-
-        const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
-        const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
-        const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
-        const __m128i q8    = _mm_packus_epi16(q16, q16);
+        const __m128i lo128  = _mm256_castsi256_si128(clamped);
+        const __m128i hi128  = _mm256_extracti128_si256(clamped, 1);
+        const __m128i q16    = _mm_packus_epi32(lo128, hi128);
+        const __m128i q8     = _mm_packus_epi16(q16, q16);
         _mm_storel_epi64(reinterpret_cast<__m128i*>(out + j), q8);
     }
 }
@@ -1335,16 +1341,6 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 
 }  // namespace
 
-// Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
-static int log2_power_of_two(std::int32_t x) {
-    if (x <= 0 || (x & (x - 1)) != 0)
-        return 0;
-    int s = 0;
-    while ((1 << s) < x)
-        ++s;
-    return s;
-}
-
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
@@ -1353,6 +1349,7 @@ struct Network::Impl {
     std::int32_t positionalFtQuantizedOne = 0;  // from metadata POSITIONAL_FT_QUANTIZED_ONE
     std::int32_t hiddenQuantizedOne       = 0;
     std::int32_t weightScaleHidden        = 0;
+    int          weightScaleHiddenShift   = 0;  // log2(weightScaleHidden) when power-of-two, else 0
     std::int64_t outputScale              = 0;
     int          positionalFtShift        = 0;  // log2(positionalFtQuantizedOne) when power-of-two, else 0
     std::int16_t positionalMulhrsK        = 0;  // hiddenQ * 2^(ftShift-1) when it fits in i16, else 0
@@ -1487,6 +1484,16 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
         if (k > 0 && k <= 32767)
             newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
     }
+
+    // Precompute shift for power-of-two weightScaleHidden (used for post-H1 dense layer clip/quantize).
+    newImpl->weightScaleHiddenShift = log2_power_of_two(newImpl->weightScaleHidden);
+    if (newImpl->weightScaleHiddenShift <= 0)
+    {
+        err = "weightScaleHidden (" + std::to_string(newImpl->weightScaleHidden)
+            + ") is not a power of two; non-power-of-two hidden scales are not supported";
+        return false;
+    }
+
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1531,6 +1538,15 @@ bool Network::load_from_memory(const unsigned char* data, std::size_t size, std:
         if (k > 0 && k <= 32767)
             newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
     }
+
+    newImpl->weightScaleHiddenShift = log2_power_of_two(newImpl->weightScaleHidden);
+    if (newImpl->weightScaleHiddenShift <= 0)
+    {
+        err = "weightScaleHidden (" + std::to_string(newImpl->weightScaleHidden)
+            + ") is not a power of two; non-power-of-two hidden scales are not supported";
+        return false;
+    }
+
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1614,6 +1630,8 @@ void Network::verify(std::string evalfilePath,
        << " POS_FT_Q=" << impl_->positionalFtQuantizedOne
        << " (shift=" << impl_->positionalFtShift
        << ", mulhrsK=" << impl_->positionalMulhrsK << ")"
+       << " | wsh=" << impl_->weightScaleHidden
+       << " (shift=" << impl_->weightScaleHiddenShift << ")"
        << " | engine_output_scale=" << impl_->engineValueOutputScale;
     if (impl_->metadataJsonPresent)
         ss << " | metadata-json";
