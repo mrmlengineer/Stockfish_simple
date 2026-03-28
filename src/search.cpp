@@ -133,6 +133,8 @@ void accumulate_nnuex_metrics(NNUEXMetrics& dst, const NNUEXMetrics& src) {
     dst.replayAdvanceMoveNs += src.replayAdvanceMoveNs;
     dst.replayAdvanceNullCalls += src.replayAdvanceNullCalls;
     dst.replayAdvanceNullNs += src.replayAdvanceNullNs;
+    dst.materializeStackWalkNs += src.materializeStackWalkNs;
+    dst.replayLoopNs += src.replayLoopNs;
     dst.doMoveNs += src.doMoveNs;
     dst.doNullMoveNs += src.doNullMoveNs;
     dst.undoMoveNs += src.undoMoveNs;
@@ -213,6 +215,8 @@ NNUEXMetrics diff_nnuex_metrics(const NNUEXMetrics& after, const NNUEXMetrics& b
     d.replayAdvanceMoveNs = after.replayAdvanceMoveNs - before.replayAdvanceMoveNs;
     d.replayAdvanceNullCalls = after.replayAdvanceNullCalls - before.replayAdvanceNullCalls;
     d.replayAdvanceNullNs = after.replayAdvanceNullNs - before.replayAdvanceNullNs;
+    d.materializeStackWalkNs = after.materializeStackWalkNs - before.materializeStackWalkNs;
+    d.replayLoopNs = after.replayLoopNs - before.replayLoopNs;
     d.doMoveNs = after.doMoveNs - before.doMoveNs;
     d.doNullMoveNs = after.doNullMoveNs - before.doNullMoveNs;
     d.undoMoveNs = after.undoMoveNs - before.undoMoveNs;
@@ -581,12 +585,15 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
     }
 
     std::size_t begin = nnuexAccumulatorSize;
-    while (begin > 0)
     {
-        const auto& entry = nnuexAccumulatorStack[begin - 1];
-        if (entry.computed && entry.state.valid && entry.state.key == entry.key)
-            break;
-        --begin;
+        ScopedNsTimer stackWalkTimer(metricsEnabled ? &nnuexMetrics.materializeStackWalkNs : nullptr);
+        while (begin > 0)
+        {
+            const auto& entry = nnuexAccumulatorStack[begin - 1];
+            if (entry.computed && entry.state.valid && entry.state.key == entry.key)
+                break;
+            --begin;
+        }
     }
 
     if (begin == 0)
@@ -602,6 +609,8 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
         nnuexMetrics.evalIncrementalTopReplaySteps += nnuexAccumulatorSize - begin;
     }
 
+    {
+    ScopedNsTimer replayLoopTimer(metricsEnabled ? &nnuexMetrics.replayLoopNs : nullptr);
     for (std::size_t idx = begin; idx < nnuexAccumulatorSize; ++idx)
     {
         const auto& prev = nnuexAccumulatorStack[idx - 1];
@@ -649,6 +658,7 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 inc = &top.state;
             return inc != nullptr;
         }
+    }
     }
 
     if (top.computed && top.state.valid && top.state.key == pos.key())
@@ -793,6 +803,8 @@ void Search::Worker::start_searching() {
                   << " search_replay_advance_move_ns=" << metricsSearch.replayAdvanceMoveNs
                   << " search_replay_advance_null_calls=" << metricsSearch.replayAdvanceNullCalls
                   << " search_replay_advance_null_ns=" << metricsSearch.replayAdvanceNullNs
+                  << " search_materialize_stack_walk_ns=" << metricsSearch.materializeStackWalkNs
+                  << " search_replay_loop_ns=" << metricsSearch.replayLoopNs
                   << " search_do_move_ns=" << metricsSearch.doMoveNs
                   << " search_do_null_move_ns=" << metricsSearch.doNullMoveNs
                   << " search_undo_move_ns=" << metricsSearch.undoMoveNs
@@ -866,6 +878,8 @@ void Search::Worker::start_searching() {
                   << " total_replay_advance_move_ns=" << metricsAfter.replayAdvanceMoveNs
                   << " total_replay_advance_null_calls=" << metricsAfter.replayAdvanceNullCalls
                   << " total_replay_advance_null_ns=" << metricsAfter.replayAdvanceNullNs
+                  << " total_materialize_stack_walk_ns=" << metricsAfter.materializeStackWalkNs
+                  << " total_replay_loop_ns=" << metricsAfter.replayLoopNs
                   << " total_do_move_ns=" << metricsAfter.doMoveNs
                   << " total_do_null_move_ns=" << metricsAfter.doNullMoveNs
                   << " total_undo_move_ns=" << metricsAfter.undoMoveNs

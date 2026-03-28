@@ -305,6 +305,8 @@ struct NNUEXMetrics {
     std::uint64_t replayAdvanceMoveNs              = 0;
     std::uint64_t replayAdvanceNullCalls           = 0;
     std::uint64_t replayAdvanceNullNs              = 0;
+    std::uint64_t materializeStackWalkNs           = 0;
+    std::uint64_t replayLoopNs                     = 0;
     std::uint64_t doMoveNs                         = 0;
     std::uint64_t doNullMoveNs                     = 0;
     std::uint64_t undoMoveNs                       = 0;
