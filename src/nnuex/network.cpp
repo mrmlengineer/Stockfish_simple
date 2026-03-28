@@ -1158,16 +1158,6 @@ bool read_scaled_array(ByteReader& rd, std::size_t count, float scale, std::vect
     return true;
 }
 
-[[maybe_unused]] bool read_scaled_scalar_i32(ByteReader& rd, float scale, float& out) {
-    if (scale == 0.0f)
-        return false;
-    std::int32_t v{};
-    if (!rd.read_i32(v))
-        return false;
-    out = static_cast<float>(v) / scale;
-    return true;
-}
-
 template<typename IntT>
 bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT>& out) {
     out.resize(count);
@@ -1272,46 +1262,7 @@ struct EncodedFen {
     int                                           bucket16           = 0;
 };
 
-int piece_index_no_pawn(char p) {
-    switch (p)
-    {
-    case 'r':
-        return 0;
-    case 'n':
-        return 1;
-    case 'b':
-        return 2;
-    case 'q':
-        return 3;
-    case 'k':
-        return 4;
-    default:
-        return -1;
-    }
-}
-
-int piece_index_all(char p) {
-    switch (p)
-    {
-    case 'p':
-        return 0;
-    case 'r':
-        return 1;
-    case 'n':
-        return 2;
-    case 'b':
-        return 3;
-    case 'q':
-        return 4;
-    case 'k':
-        return 5;
-    default:
-        return -1;
-    }
-}
-
 bool add_active_feature(EncodedFen& enc, int featureIndex);
-[[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err);
 bool encode_position_v2(const Position& pos, EncodedFen& out);
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
 bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
@@ -1319,7 +1270,6 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                                           std::array<std::int16_t, kExpectedH1Pos>* outH1Pre,
                                           std::array<std::uint8_t, kExpectedH1Pos>& outH1Clip);
 std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl, const EncodedFen& enc);
-std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc);
 bool build_incremental_state_from_encoded(const Network::Impl&  impl,
                                           const EncodedFen&     enc,
                                           Key                   key,
@@ -1655,7 +1605,7 @@ std::optional<Evaluation> Network::evaluate(const Position& pos) const {
         if (!encode_position_v2(pos, enc))
             return std::nullopt;
     }
-    return evaluate_encoded(*impl_, enc);
+    return evaluate_encoded_alt_direct(*impl_, enc);
 }
 
 std::optional<Evaluation> Network::evaluate(const IncrementalState& state) const {
@@ -1697,122 +1647,6 @@ bool Network::advance_incremental_state_null_from_meta(const IncrementalState& p
 }
 
 namespace {
-
-[[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err) {
-    out = EncodedFen{};
-
-    const auto space1 = fen.find(' ');
-    if (space1 == std::string_view::npos || space1 == 0)
-    {
-        err = "Invalid FEN: missing board/side fields";
-        return false;
-    }
-    const auto sideStart = space1 + 1;
-    const auto space2    = fen.find(' ', sideStart);
-    const auto board     = fen.substr(0, space1);
-    const auto side      = (space2 == std::string_view::npos) ? fen.substr(sideStart)
-                                                              : fen.substr(sideStart, space2 - sideStart);
-    if (side.empty() || (side[0] != 'w' && side[0] != 'b'))
-    {
-        err = "Invalid FEN: side-to-move must be w/b";
-        return false;
-    }
-
-    std::size_t offset = 0;
-    std::size_t cursor = 0;
-    int         rankIdx = 0;
-
-    while (cursor <= board.size())
-    {
-        const auto slash = board.find('/', cursor);
-        const auto end   = (slash == std::string_view::npos) ? board.size() : slash;
-        const auto rank  = board.substr(cursor, end - cursor);
-
-        if (rankIdx >= 8)
-        {
-            err = "Invalid FEN board: too many ranks";
-            return false;
-        }
-
-        const int  actualRank    = 8 - rankIdx;
-        const bool isEdgeRank    = actualRank == 1 || actualRank == 8;
-        const int  nTypes        = isEdgeRank ? 5 : 6;
-        const int  featuresPerSq = nTypes * 2;
-        int        fileIdx       = 0;
-
-        for (char ch : rank)
-        {
-            const auto uch = static_cast<unsigned char>(ch);
-            if (std::isdigit(uch))
-            {
-                const int skip = ch - '0';
-                if (skip < 1 || skip > 8 || fileIdx + skip > 8)
-                {
-                    err = "Invalid FEN board digit span";
-                    return false;
-                }
-                fileIdx += skip;
-                offset += std::size_t(skip * featuresPerSq);
-                continue;
-            }
-
-            const char p = static_cast<char>(std::tolower(uch));
-            if (piece_index_all(p) < 0)
-            {
-                err = "Invalid FEN board piece";
-                return false;
-            }
-
-            const bool isBlack = std::islower(uch) != 0;
-            const int  idx     = isEdgeRank ? piece_index_no_pawn(p) : piece_index_all(p);
-            if (idx >= 0)
-            {
-                const int featureIndex = static_cast<int>(offset) + (isBlack ? nTypes : 0) + idx;
-                if (!add_active_feature(out, featureIndex))
-                {
-                    err = "Invalid FEN feature encoding";
-                    return false;
-                }
-            }
-
-            ++fileIdx;
-            ++out.pieceCount;
-            offset += std::size_t(featuresPerSq);
-            if (fileIdx > 8)
-            {
-                err = "Invalid FEN board rank width";
-                return false;
-            }
-        }
-
-        if (fileIdx != 8)
-        {
-            err = "Invalid FEN board rank width";
-            return false;
-        }
-
-        ++rankIdx;
-        if (slash == std::string_view::npos)
-            break;
-        cursor = slash + 1;
-    }
-
-    if (rankIdx != 8 || offset != 736)
-    {
-        err = "Invalid FEN board shape";
-        return false;
-    }
-
-    out.stmBlack = side[0] == 'b' ? 1 : 0;
-    if (out.stmBlack && !add_active_feature(out, 736))
-    {
-        err = "Invalid FEN stm feature encoding";
-        return false;
-    }
-    out.bucket8       = std::clamp((std::max(out.pieceCount, 1) - 1) / 4, 0, 7);
-    out.bucket16      = out.bucket8 * 2 + out.stmBlack;
-    return true;
-}
 
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err) {
     const Header& h = impl.header;
@@ -2641,10 +2475,6 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
     out.psqtNorm   = psqtNorm;
     out.posNorm    = posNorm;
     return out;
-}
-
-std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc) {
-    return evaluate_encoded_alt_direct(impl, enc);
 }
 
 }  // namespace
