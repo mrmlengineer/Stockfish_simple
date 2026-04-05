@@ -109,6 +109,16 @@ ScopedRuntimeMetricsBinding::ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) n
 ScopedRuntimeMetricsBinding::~ScopedRuntimeMetricsBinding() noexcept { gRuntimeMetricsSink = prev_; }
 #endif
 
+// Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
+static int log2_power_of_two(std::int32_t x) {
+    if (x <= 0 || (x & (x - 1)) != 0)
+        return 0;
+    int s = 0;
+    while ((1 << s) < x)
+        ++s;
+    return s;
+}
+
 namespace {
 
 inline float clip01(float x) {
@@ -151,30 +161,26 @@ void quantize_clip_i32_to_u8_avx2_exact(const std::int32_t* acc,
         return;
     }
 
+    // denom is validated as power-of-two at load time; use integer shift.
+    const int shift = log2_power_of_two(denom);
+
     const __m256i zero32    = _mm256_setzero_si256();
-    const __m256d denomD    = _mm256_set1_pd(double(denom));
-    const __m256d halfD     = _mm256_set1_pd(double(denom / 2));
-    const __m256d zeroD     = _mm256_setzero_pd();
-    const __m256d hiddenQD  = _mm256_set1_pd(double(hiddenQuantizedOne));
+    const __m256i half32    = _mm256_set1_epi32(denom / 2);
+    const __m128i shift128  = _mm_cvtsi32_si128(shift);
+    const __m256i hiddenQ32 = _mm256_set1_epi32(hiddenQuantizedOne);
 
     for (std::size_t j = 0; j < count; j += 8)
     {
         const __m256i x32    = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + j));
-        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);
+        const __m256i xPos32 = _mm256_max_epi32(x32, zero32);           // ReLU
+        const __m256i biased = _mm256_add_epi32(xPos32, half32);        // + denom/2
+        const __m256i q32    = _mm256_srl_epi32(biased, shift128);      // >> shift
+        const __m256i clamped = _mm256_min_epu32(q32, hiddenQ32);       // clamp
 
-        const __m128i xPosLo = _mm256_castsi256_si128(xPos32);
-        const __m128i xPosHi = _mm256_extracti128_si256(xPos32, 1);
-
-        __m256d qLo = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosLo), halfD), denomD);
-        __m256d qHi = _mm256_div_pd(_mm256_add_pd(_mm256_cvtepi32_pd(xPosHi), halfD), denomD);
-
-        qLo = _mm256_min_pd(_mm256_max_pd(qLo, zeroD), hiddenQD);
-        qHi = _mm256_min_pd(_mm256_max_pd(qHi, zeroD), hiddenQD);
-
-        const __m128i qLo32 = _mm256_cvttpd_epi32(qLo);
-        const __m128i qHi32 = _mm256_cvttpd_epi32(qHi);
-        const __m128i q16   = _mm_packus_epi32(qLo32, qHi32);
-        const __m128i q8    = _mm_packus_epi16(q16, q16);
+        const __m128i lo128  = _mm256_castsi256_si128(clamped);
+        const __m128i hi128  = _mm256_extracti128_si256(clamped, 1);
+        const __m128i q16    = _mm_packus_epi32(lo128, hi128);
+        const __m128i q8     = _mm_packus_epi16(q16, q16);
         _mm_storel_epi64(reinterpret_cast<__m128i*>(out + j), q8);
     }
 }
@@ -1152,16 +1158,6 @@ bool read_scaled_array(ByteReader& rd, std::size_t count, float scale, std::vect
     return true;
 }
 
-[[maybe_unused]] bool read_scaled_scalar_i32(ByteReader& rd, float scale, float& out) {
-    if (scale == 0.0f)
-        return false;
-    std::int32_t v{};
-    if (!rd.read_i32(v))
-        return false;
-    out = static_cast<float>(v) / scale;
-    return true;
-}
-
 template<typename IntT>
 bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT>& out) {
     out.resize(count);
@@ -1266,46 +1262,7 @@ struct EncodedFen {
     int                                           bucket16           = 0;
 };
 
-int piece_index_no_pawn(char p) {
-    switch (p)
-    {
-    case 'r':
-        return 0;
-    case 'n':
-        return 1;
-    case 'b':
-        return 2;
-    case 'q':
-        return 3;
-    case 'k':
-        return 4;
-    default:
-        return -1;
-    }
-}
-
-int piece_index_all(char p) {
-    switch (p)
-    {
-    case 'p':
-        return 0;
-    case 'r':
-        return 1;
-    case 'n':
-        return 2;
-    case 'b':
-        return 3;
-    case 'q':
-        return 4;
-    case 'k':
-        return 5;
-    default:
-        return -1;
-    }
-}
-
 bool add_active_feature(EncodedFen& enc, int featureIndex);
-[[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err);
 bool encode_position_v2(const Position& pos, EncodedFen& out);
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err);
 bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
@@ -1313,7 +1270,6 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                                           std::array<std::int16_t, kExpectedH1Pos>* outH1Pre,
                                           std::array<std::uint8_t, kExpectedH1Pos>& outH1Clip);
 std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl, const EncodedFen& enc);
-std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc);
 bool build_incremental_state_from_encoded(const Network::Impl&  impl,
                                           const EncodedFen&     enc,
                                           Key                   key,
@@ -1335,16 +1291,6 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 
 }  // namespace
 
-// Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
-static int log2_power_of_two(std::int32_t x) {
-    if (x <= 0 || (x & (x - 1)) != 0)
-        return 0;
-    int s = 0;
-    while ((1 << s) < x)
-        ++s;
-    return s;
-}
-
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
@@ -1353,6 +1299,7 @@ struct Network::Impl {
     std::int32_t positionalFtQuantizedOne = 0;  // from metadata POSITIONAL_FT_QUANTIZED_ONE
     std::int32_t hiddenQuantizedOne       = 0;
     std::int32_t weightScaleHidden        = 0;
+    int          weightScaleHiddenShift   = 0;  // log2(weightScaleHidden) when power-of-two, else 0
     std::int64_t outputScale              = 0;
     int          positionalFtShift        = 0;  // log2(positionalFtQuantizedOne) when power-of-two, else 0
     std::int16_t positionalMulhrsK        = 0;  // hiddenQ * 2^(ftShift-1) when it fits in i16, else 0
@@ -1487,6 +1434,16 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
         if (k > 0 && k <= 32767)
             newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
     }
+
+    // Precompute shift for power-of-two weightScaleHidden (used for post-H1 dense layer clip/quantize).
+    newImpl->weightScaleHiddenShift = log2_power_of_two(newImpl->weightScaleHidden);
+    if (newImpl->weightScaleHiddenShift <= 0)
+    {
+        err = "weightScaleHidden (" + std::to_string(newImpl->weightScaleHidden)
+            + ") is not a power of two; non-power-of-two hidden scales are not supported";
+        return false;
+    }
+
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1531,6 +1488,15 @@ bool Network::load_from_memory(const unsigned char* data, std::size_t size, std:
         if (k > 0 && k <= 32767)
             newImpl->positionalMulhrsK = static_cast<std::int16_t>(k);
     }
+
+    newImpl->weightScaleHiddenShift = log2_power_of_two(newImpl->weightScaleHidden);
+    if (newImpl->weightScaleHiddenShift <= 0)
+    {
+        err = "weightScaleHidden (" + std::to_string(newImpl->weightScaleHidden)
+            + ") is not a power of two; non-power-of-two hidden scales are not supported";
+        return false;
+    }
+
     if (!load_engine_value_output_scale_from_metadata(bytes, newImpl->header, newImpl->engineValueOutputScale, err))
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
@@ -1614,6 +1580,8 @@ void Network::verify(std::string evalfilePath,
        << " POS_FT_Q=" << impl_->positionalFtQuantizedOne
        << " (shift=" << impl_->positionalFtShift
        << ", mulhrsK=" << impl_->positionalMulhrsK << ")"
+       << " | wsh=" << impl_->weightScaleHidden
+       << " (shift=" << impl_->weightScaleHiddenShift << ")"
        << " | engine_output_scale=" << impl_->engineValueOutputScale;
     if (impl_->metadataJsonPresent)
         ss << " | metadata-json";
@@ -1629,9 +1597,15 @@ std::optional<Evaluation> Network::evaluate(const Position& pos) const {
         return std::nullopt;
 
     EncodedFen enc;
-    if (!encode_position_v2(pos, enc))
-        return std::nullopt;
-    return evaluate_encoded(*impl_, enc);
+    RuntimeMetrics* metrics = gRuntimeMetricsSink;
+    if (metrics)
+        ++metrics->encodePositionCalls;
+    {
+        ScopedRuntimeMetricTimer encodeTimer(metrics ? &metrics->encodePositionNs : nullptr);
+        if (!encode_position_v2(pos, enc))
+            return std::nullopt;
+    }
+    return evaluate_encoded_alt_direct(*impl_, enc);
 }
 
 std::optional<Evaluation> Network::evaluate(const IncrementalState& state) const {
@@ -1673,122 +1647,6 @@ bool Network::advance_incremental_state_null_from_meta(const IncrementalState& p
 }
 
 namespace {
-
-[[maybe_unused]] bool encode_fen_v2(std::string_view fen, EncodedFen& out, std::string& err) {
-    out = EncodedFen{};
-
-    const auto space1 = fen.find(' ');
-    if (space1 == std::string_view::npos || space1 == 0)
-    {
-        err = "Invalid FEN: missing board/side fields";
-        return false;
-    }
-    const auto sideStart = space1 + 1;
-    const auto space2    = fen.find(' ', sideStart);
-    const auto board     = fen.substr(0, space1);
-    const auto side      = (space2 == std::string_view::npos) ? fen.substr(sideStart)
-                                                              : fen.substr(sideStart, space2 - sideStart);
-    if (side.empty() || (side[0] != 'w' && side[0] != 'b'))
-    {
-        err = "Invalid FEN: side-to-move must be w/b";
-        return false;
-    }
-
-    std::size_t offset = 0;
-    std::size_t cursor = 0;
-    int         rankIdx = 0;
-
-    while (cursor <= board.size())
-    {
-        const auto slash = board.find('/', cursor);
-        const auto end   = (slash == std::string_view::npos) ? board.size() : slash;
-        const auto rank  = board.substr(cursor, end - cursor);
-
-        if (rankIdx >= 8)
-        {
-            err = "Invalid FEN board: too many ranks";
-            return false;
-        }
-
-        const int  actualRank    = 8 - rankIdx;
-        const bool isEdgeRank    = actualRank == 1 || actualRank == 8;
-        const int  nTypes        = isEdgeRank ? 5 : 6;
-        const int  featuresPerSq = nTypes * 2;
-        int        fileIdx       = 0;
-
-        for (char ch : rank)
-        {
-            const auto uch = static_cast<unsigned char>(ch);
-            if (std::isdigit(uch))
-            {
-                const int skip = ch - '0';
-                if (skip < 1 || skip > 8 || fileIdx + skip > 8)
-                {
-                    err = "Invalid FEN board digit span";
-                    return false;
-                }
-                fileIdx += skip;
-                offset += std::size_t(skip * featuresPerSq);
-                continue;
-            }
-
-            const char p = static_cast<char>(std::tolower(uch));
-            if (piece_index_all(p) < 0)
-            {
-                err = "Invalid FEN board piece";
-                return false;
-            }
-
-            const bool isBlack = std::islower(uch) != 0;
-            const int  idx     = isEdgeRank ? piece_index_no_pawn(p) : piece_index_all(p);
-            if (idx >= 0)
-            {
-                const int featureIndex = static_cast<int>(offset) + (isBlack ? nTypes : 0) + idx;
-                if (!add_active_feature(out, featureIndex))
-                {
-                    err = "Invalid FEN feature encoding";
-                    return false;
-                }
-            }
-
-            ++fileIdx;
-            ++out.pieceCount;
-            offset += std::size_t(featuresPerSq);
-            if (fileIdx > 8)
-            {
-                err = "Invalid FEN board rank width";
-                return false;
-            }
-        }
-
-        if (fileIdx != 8)
-        {
-            err = "Invalid FEN board rank width";
-            return false;
-        }
-
-        ++rankIdx;
-        if (slash == std::string_view::npos)
-            break;
-        cursor = slash + 1;
-    }
-
-    if (rankIdx != 8 || offset != 736)
-    {
-        err = "Invalid FEN board shape";
-        return false;
-    }
-
-    out.stmBlack = side[0] == 'b' ? 1 : 0;
-    if (out.stmBlack && !add_active_feature(out, 736))
-    {
-        err = "Invalid FEN stm feature encoding";
-        return false;
-    }
-    out.bucket8       = std::clamp((std::max(out.pieceCount, 1) - 1) / 4, 0, 7);
-    out.bucket16      = out.bucket8 * 2 + out.stmBlack;
-    return true;
-}
 
 bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network::Impl& impl, std::string& err) {
     const Header& h = impl.header;
@@ -2617,10 +2475,6 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
     out.psqtNorm   = psqtNorm;
     out.posNorm    = posNorm;
     return out;
-}
-
-std::optional<Evaluation> evaluate_encoded(const Network::Impl& impl, const EncodedFen& enc) {
-    return evaluate_encoded_alt_direct(impl, enc);
 }
 
 }  // namespace

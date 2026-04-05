@@ -70,6 +70,28 @@ struct StateInfo {
 // elements are not invalidated upon list resizing.
 using StateListPtr = std::unique_ptr<std::deque<StateInfo>>;
 
+struct PositionMoveProfileMetrics {
+    std::uint64_t sampledDoMoveCalls   = 0;
+    std::uint64_t stateCopyCalls       = 0;
+    std::uint64_t stateCopyNs          = 0;
+    std::uint64_t checkInfoCalls       = 0;
+    std::uint64_t checkInfoNs          = 0;
+    std::uint64_t repetitionCalls      = 0;
+    std::uint64_t repetitionNs         = 0;
+};
+
+class ScopedPositionMoveProfileBinding {
+   public:
+    explicit ScopedPositionMoveProfileBinding(PositionMoveProfileMetrics* sink) noexcept;
+    ~ScopedPositionMoveProfileBinding() noexcept;
+
+    ScopedPositionMoveProfileBinding(const ScopedPositionMoveProfileBinding&) = delete;
+    ScopedPositionMoveProfileBinding& operator=(const ScopedPositionMoveProfileBinding&) = delete;
+
+   private:
+    PositionMoveProfileMetrics* prev_ = nullptr;
+};
+
 // Position class stores information regarding the board representation as
 // pieces, side to move, hash keys, castling info, etc. Important methods are
 // do_move() and undo_move(), used by the search to update node info when
@@ -139,7 +161,6 @@ class Position {
                  StateInfo&                newSt,
                  bool                      givesCheck,
                  DirtyPiece&               dp,
-                 DirtyThreats&             dts,
                  const TranspositionTable* tt,
                  const SharedHistories*    worker);
     void undo_move(Move m);
@@ -175,9 +196,9 @@ class Position {
 
     StateInfo* state() const;
 
-    void put_piece(Piece pc, Square s, DirtyThreats* const dts = nullptr);
-    void remove_piece(Square s, DirtyThreats* const dts = nullptr);
-    void swap_piece(Square s, Piece pc, DirtyThreats* const dts = nullptr);
+    void put_piece(Piece pc, Square s);
+    void remove_piece(Square s);
+    void swap_piece(Square s, Piece pc);
 
    private:
     // Initialization helpers (used while setting up a position)
@@ -187,20 +208,14 @@ class Position {
     void set_check_info() const;
 
     // Other helpers
-    template<bool PutPiece, bool ComputeRay = true>
-    void update_piece_threats(Piece               pc,
-                              Square              s,
-                              DirtyThreats* const dts,
-                              Bitboard            noRaysContaining = -1ULL) const;
-    void move_piece(Square from, Square to, DirtyThreats* const dts = nullptr);
+    void move_piece(Square from, Square to);
     template<bool Do>
-    void do_castling(Color               us,
-                     Square              from,
-                     Square&             to,
-                     Square&             rfrom,
-                     Square&             rto,
-                     DirtyThreats* const dts = nullptr,
-                     DirtyPiece* const   dp  = nullptr);
+    void do_castling(Color             us,
+                     Square            from,
+                     Square&           to,
+                     Square&           rfrom,
+                     Square&           rto,
+                     DirtyPiece* const dp = nullptr);
     Key  adjust_key50(Key k) const;
 
     // Data members
@@ -217,7 +232,6 @@ class Position {
     Color        sideToMove;
     bool         chess960;
     DirtyPiece   scratch_dp;
-    DirtyThreats scratch_dts;
 };
 
 std::ostream& operator<<(std::ostream& os, const Position& pos);
@@ -346,23 +360,16 @@ inline bool Position::capture_stage(Move m) const {
 
 inline Piece Position::captured_piece() const { return st->capturedPiece; }
 
-inline void Position::put_piece(Piece pc, Square s, DirtyThreats* const dts) {
+inline void Position::put_piece(Piece pc, Square s) {
     board[s] = pc;
     byTypeBB[ALL_PIECES] |= byTypeBB[type_of(pc)] |= s;
     byColorBB[color_of(pc)] |= s;
     pieceCount[pc]++;
     pieceCount[make_piece(color_of(pc), ALL_PIECES)]++;
-
-    if (dts)
-        update_piece_threats<true>(pc, s, dts);
 }
 
-inline void Position::remove_piece(Square s, DirtyThreats* const dts) {
+inline void Position::remove_piece(Square s) {
     Piece pc = board[s];
-
-    if (dts)
-        update_piece_threats<false>(pc, s, dts);
-
     byTypeBB[ALL_PIECES] ^= s;
     byTypeBB[type_of(pc)] ^= s;
     byColorBB[color_of(pc)] ^= s;
@@ -371,40 +378,23 @@ inline void Position::remove_piece(Square s, DirtyThreats* const dts) {
     pieceCount[make_piece(color_of(pc), ALL_PIECES)]--;
 }
 
-inline void Position::move_piece(Square from, Square to, DirtyThreats* const dts) {
+inline void Position::move_piece(Square from, Square to) {
     Piece    pc     = board[from];
     Bitboard fromTo = from | to;
-
-    if (dts)
-        update_piece_threats<false>(pc, from, dts, fromTo);
-
     byTypeBB[ALL_PIECES] ^= fromTo;
     byTypeBB[type_of(pc)] ^= fromTo;
     byColorBB[color_of(pc)] ^= fromTo;
     board[from] = NO_PIECE;
     board[to]   = pc;
-
-    if (dts)
-        update_piece_threats<true>(pc, to, dts, fromTo);
 }
 
-inline void Position::swap_piece(Square s, Piece pc, DirtyThreats* const dts) {
-    Piece old = board[s];
-
+inline void Position::swap_piece(Square s, Piece pc) {
     remove_piece(s);
-
-    if (dts)
-        update_piece_threats<false, false>(old, s, dts);
-
     put_piece(pc, s);
-
-    if (dts)
-        update_piece_threats<true, false>(pc, s, dts);
 }
 
 inline void Position::do_move(Move m, StateInfo& newSt, const TranspositionTable* tt = nullptr) {
-    new (&scratch_dts) DirtyThreats;
-    do_move(m, newSt, gives_check(m), scratch_dp, scratch_dts, tt, nullptr);
+    do_move(m, newSt, gives_check(m), scratch_dp, tt, nullptr);
 }
 
 inline StateInfo* Position::state() const { return st; }

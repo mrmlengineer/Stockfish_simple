@@ -60,6 +60,8 @@ struct IncrementalState {
 };
 
 struct RuntimeMetrics {
+    std::uint64_t encodePositionCalls      = 0;
+    std::uint64_t encodePositionNs         = 0;
     std::uint64_t h1ClipCalls            = 0;
     std::uint64_t h1ClipNs               = 0;
     std::uint64_t postH1ForwardCalls     = 0;
