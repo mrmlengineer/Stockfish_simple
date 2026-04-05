@@ -1725,8 +1725,8 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
 
             ++out.pieceCount;
 
-            int featureIndex = -1;
-            if (feature_index_for_piece_square(pc, sq, featureIndex))
+            const std::uint16_t featureIndex = feature_index_for_piece_square(pc, sq);
+            if (featureIndex != InvalidFeatureIndex)
             {
                 if (!add_active_feature(out, featureIndex))
                     return false;

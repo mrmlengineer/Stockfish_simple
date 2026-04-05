@@ -781,8 +781,9 @@ void Position::do_move(Move                      m,
     auto add_dirty_feature = [&](Piece featurePc, Square featureSq) {
         if (!dirtyFeatureOk)
             return;
-        std::uint16_t featureIndex = Eval::NNUEX::InvalidFeatureIndex;
-        if (!Eval::NNUEX::feature_index_for_piece_square(featurePc, featureSq, featureIndex))
+        const std::uint16_t featureIndex =
+          Eval::NNUEX::feature_index_for_piece_square(featurePc, featureSq);
+        if (featureIndex == Eval::NNUEX::InvalidFeatureIndex)
         {
             dirtyFeatureOk = false;
             dp.invalidate();
@@ -1139,12 +1140,14 @@ void Position::do_castling(Color             us,
     if constexpr (Do)
     {
         const Piece rook = make_piece(us, ROOK);
-        std::uint16_t kingToFeature   = Eval::NNUEX::InvalidFeatureIndex;
-        std::uint16_t rookFromFeature = Eval::NNUEX::InvalidFeatureIndex;
-        std::uint16_t rookToFeature   = Eval::NNUEX::InvalidFeatureIndex;
-        if (!Eval::NNUEX::feature_index_for_piece_square(dp->pc, to, kingToFeature)
-            || !Eval::NNUEX::feature_index_for_piece_square(rook, rfrom, rookFromFeature)
-            || !Eval::NNUEX::feature_index_for_piece_square(rook, rto, rookToFeature))
+        const std::uint16_t kingToFeature = Eval::NNUEX::feature_index_for_piece_square(dp->pc, to);
+        const std::uint16_t rookFromFeature =
+          Eval::NNUEX::feature_index_for_piece_square(rook, rfrom);
+        const std::uint16_t rookToFeature =
+          Eval::NNUEX::feature_index_for_piece_square(rook, rto);
+        if (kingToFeature == Eval::NNUEX::InvalidFeatureIndex
+            || rookFromFeature == Eval::NNUEX::InvalidFeatureIndex
+            || rookToFeature == Eval::NNUEX::InvalidFeatureIndex)
         {
             dp->invalidate();
             assert(false);

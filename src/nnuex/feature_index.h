@@ -40,7 +40,7 @@ inline const std::array<SquareFeatureGeom, SQUARE_NB>& square_feature_geoms() {
     return geoms;
 }
 
-inline int piece_index_no_pawn(PieceType pt) {
+constexpr int piece_index_no_pawn(PieceType pt) {
     switch (pt)
     {
     case ROOK:
@@ -58,7 +58,7 @@ inline int piece_index_no_pawn(PieceType pt) {
     }
 }
 
-inline int piece_index_all(PieceType pt) {
+constexpr int piece_index_all(PieceType pt) {
     switch (pt)
     {
     case PAWN:
@@ -78,25 +78,54 @@ inline int piece_index_all(PieceType pt) {
     }
 }
 
+constexpr std::size_t piece_square_feature_slot(Piece pc, Square sq) {
+    return std::size_t(pc) * SQUARE_NB + std::size_t(sq);
+}
+
+inline const std::array<std::uint16_t, PIECE_NB * SQUARE_NB>& piece_square_feature_indices() {
+    static const std::array<std::uint16_t, PIECE_NB * SQUARE_NB> indices = [] {
+        std::array<std::uint16_t, PIECE_NB * SQUARE_NB> out{};
+        for (auto& featureIndex : out)
+            featureIndex = InvalidFeatureIndex;
+
+        for (int pcValue = 0; pcValue < PIECE_NB; ++pcValue)
+        {
+            const Piece pc = Piece(pcValue);
+            if (pc == NO_PIECE)
+                continue;
+
+            for (int sqValue = 0; sqValue < SQUARE_NB; ++sqValue)
+            {
+                const Square sq   = Square(sqValue);
+                const auto&  geom = square_feature_geoms()[std::size_t(sq)];
+                const int    idx = geom.nTypes == 5 ? piece_index_no_pawn(type_of(pc))
+                                                    : piece_index_all(type_of(pc));
+                if (idx < 0)
+                    continue;
+
+                const int colorOffset = color_of(pc) == BLACK ? geom.nTypes : 0;
+                const int outIndex    = geom.base + colorOffset + idx;
+                if (outIndex < 0 || outIndex >= 736)
+                    continue;
+
+                out[piece_square_feature_slot(pc, sq)] = static_cast<std::uint16_t>(outIndex);
+            }
+        }
+
+        return out;
+    }();
+    return indices;
+}
+
+inline std::uint16_t feature_index_for_piece_square(Piece pc, Square sq) noexcept {
+    if (pc == NO_PIECE || sq == SQ_NONE || !is_ok(sq))
+        return InvalidFeatureIndex;
+    return piece_square_feature_indices()[piece_square_feature_slot(pc, sq)];
+}
+
 inline bool feature_index_for_piece_square(Piece pc, Square sq, std::uint16_t& featureIndex) {
-    if (pc == NO_PIECE || sq == SQ_NONE)
-        return false;
-    if (!is_ok(sq))
-        return false;
-
-    const auto& geom = square_feature_geoms()[std::size_t(sq)];
-    const int   idx =
-      geom.nTypes == 5 ? piece_index_no_pawn(type_of(pc)) : piece_index_all(type_of(pc));
-    if (idx < 0)
-        return false;
-
-    const int colorOffset = color_of(pc) == BLACK ? geom.nTypes : 0;
-    const int out         = geom.base + colorOffset + idx;
-    if (out < 0 || out >= 736)
-        return false;
-
-    featureIndex = static_cast<std::uint16_t>(out);
-    return true;
+    featureIndex = feature_index_for_piece_square(pc, sq);
+    return featureIndex != InvalidFeatureIndex;
 }
 
 inline bool feature_index_for_piece_square(Piece pc, Square sq, int& featureIndex) {
