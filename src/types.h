@@ -36,6 +36,7 @@
 // -DUSE_PEXT    | Add runtime support for use of pext asm-instruction. Works
 //               | only in 64-bit mode and requires hardware with pext support.
 
+    #include <array>
     #include <cassert>
     #include <cstddef>
     #include <cstdint>
@@ -279,16 +280,39 @@ enum Rank : uint8_t {
     RANK_NB
 };
 
-// Keep track of what a move changes on the board (used by NNUE)
-struct DirtyPiece {
-    Piece  pc;        // this is never allowed to be NO_PIECE
-    Square from, to;  // to should be SQ_NONE for promotions
+struct DirtyPieceOp {
+    std::uint16_t featureIndex = 0xFFFFu;
+};
 
-    // if {add,remove}_sq is SQ_NONE, {add,remove}_pc is allowed to be
-    // uninitialized
-    // castling uses add_sq and remove_sq to remove and add the rook
-    Square remove_sq, add_sq;
-    Piece  remove_pc, add_pc;
+// Keep track of what a move changes on the board (used by NNUEX).
+// The moved piece identity stays separate because search still uses it for
+// continuation history indexing.
+struct DirtyPiece {
+    static constexpr std::size_t MaxOps = 4;
+
+    Piece                        pc              = NO_PIECE;
+    std::int8_t                  opCount         = 0;
+    std::int8_t                  pieceCountDelta = 0;
+    std::array<DirtyPieceOp, MaxOps> ops{};
+
+    void reset(Piece movedPc) noexcept {
+        assert(movedPc != NO_PIECE);
+        pc              = movedPc;
+        opCount         = 0;
+        pieceCountDelta = 0;
+        ops[0].featureIndex = 0xFFFFu;
+    }
+
+    void add_operation(std::uint16_t featureIndex) noexcept {
+        assert(std::size_t(opCount) < MaxOps);
+        ops[std::size_t(opCount++)] = {featureIndex};
+    }
+
+    void invalidate() noexcept {
+        opCount         = 0;
+        pieceCountDelta = 0;
+        ops[0].featureIndex = 0xFFFFu;
+    }
 };
 
     #define ENABLE_INCR_OPERATORS_ON(T) \

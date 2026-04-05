@@ -36,6 +36,7 @@
 #include "history.h"
 #include "misc.h"
 #include "movegen.h"
+#include "nnuex/feature_index.h"
 #include "syzygy/tbprobe.h"
 #include "tt.h"
 #include "uci.h"
@@ -776,10 +777,23 @@ void Position::do_move(Move                      m,
 
     bool checkEP = false;
 
-    dp.pc             = pc;
-    dp.from           = from;
-    dp.to             = to;
-    dp.add_sq         = SQ_NONE;
+    bool dirtyFeatureOk = true;
+    auto add_dirty_feature = [&](Piece featurePc, Square featureSq) {
+        if (!dirtyFeatureOk)
+            return;
+        std::uint16_t featureIndex = Eval::NNUEX::InvalidFeatureIndex;
+        if (!Eval::NNUEX::feature_index_for_piece_square(featurePc, featureSq, featureIndex))
+        {
+            dirtyFeatureOk = false;
+            dp.invalidate();
+            assert(false);
+            return;
+        }
+        dp.add_operation(featureIndex);
+    };
+
+    dp.reset(pc);
+    add_dirty_feature(pc, from);
     assert(color_of(pc) == us);
     assert(captured == NO_PIECE || color_of(captured) == (m.type_of() != CASTLING ? them : us));
     assert(type_of(captured) != KING);
@@ -829,8 +843,8 @@ void Position::do_move(Move                      m,
                 st->minorPieceKey ^= Zobrist::psq[captured][capsq];
         }
 
-        dp.remove_pc = captured;
-        dp.remove_sq = capsq;
+        add_dirty_feature(captured, capsq);
+        --dp.pieceCountDelta;
 
         k ^= Zobrist::psq[captured][capsq];
         st->materialKey ^=
@@ -839,8 +853,6 @@ void Position::do_move(Move                      m,
         // Reset rule 50 counter
         st->rule50 = 0;
     }
-    else
-        dp.remove_sq = SQ_NONE;
 
     // Update hash key
     k ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
@@ -889,9 +901,7 @@ void Position::do_move(Move                      m,
 
             swap_piece(to, promotion);
 
-            dp.add_pc = promotion;
-            dp.add_sq = to;
-            dp.to     = SQ_NONE;
+            add_dirty_feature(promotion, to);
 
             // Update hash keys
             // Zobrist::psq[pc][to] is zero, so we don't need to clear it
@@ -921,6 +931,9 @@ void Position::do_move(Move                      m,
         if (type_of(pc) <= BISHOP)
             st->minorPieceKey ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
     }
+
+    if (m.type_of() != CASTLING && m.type_of() != PROMOTION)
+        add_dirty_feature(pc, to);
 
     // If en passant is impossible, then k will not change and we can prefetch earlier
     if (tt && !checkEP)
@@ -1035,9 +1048,12 @@ void Position::do_move(Move                      m,
     assert(pos_is_ok());
 
     assert(dp.pc != NO_PIECE);
-    assert(!(bool(captured) || m.type_of() == CASTLING) ^ (dp.remove_sq != SQ_NONE));
-    assert(dp.from != SQ_NONE);
-    assert(!(dp.add_sq != SQ_NONE) ^ (m.type_of() == PROMOTION || m.type_of() == CASTLING));
+    if (!dirtyFeatureOk)
+        return;
+    assert(dp.opCount >= 2 && dp.opCount <= 4);
+    assert(dp.ops[0].featureIndex != Eval::NNUEX::InvalidFeatureIndex);
+    assert(dp.pieceCountDelta == (captured ? -1 : 0));
+    assert(dp.opCount == (m.type_of() == CASTLING ? 4 : ((m.type_of() == PROMOTION || captured) ? 3 : 2)));
 }
 
 
@@ -1120,12 +1136,23 @@ void Position::do_castling(Color             us,
 
     assert(!Do || dp);
 
-    if (Do)
+    if constexpr (Do)
     {
-        dp->to        = to;
-        dp->remove_pc = dp->add_pc = make_piece(us, ROOK);
-        dp->remove_sq              = rfrom;
-        dp->add_sq                 = rto;
+        const Piece rook = make_piece(us, ROOK);
+        std::uint16_t kingToFeature   = Eval::NNUEX::InvalidFeatureIndex;
+        std::uint16_t rookFromFeature = Eval::NNUEX::InvalidFeatureIndex;
+        std::uint16_t rookToFeature   = Eval::NNUEX::InvalidFeatureIndex;
+        if (!Eval::NNUEX::feature_index_for_piece_square(dp->pc, to, kingToFeature)
+            || !Eval::NNUEX::feature_index_for_piece_square(rook, rfrom, rookFromFeature)
+            || !Eval::NNUEX::feature_index_for_piece_square(rook, rto, rookToFeature))
+        {
+            dp->invalidate();
+            assert(false);
+            return;
+        }
+        dp->add_operation(kingToFeature);
+        dp->add_operation(rookFromFeature);
+        dp->add_operation(rookToFeature);
     }
 
     // Remove both pieces first since squares could overlap in Chess960

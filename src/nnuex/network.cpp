@@ -31,6 +31,7 @@
 
 #include "../position.h"
 #include "../incbin/incbin.h"
+#include "feature_index.h"
 
 // Embed the default NNUEX network file in the binary (using incbin.h).
 // Declares: gEmbeddedNNUEXData[], *gEmbeddedNNUEXEnd, gEmbeddedNNUEXSize.
@@ -1709,86 +1710,6 @@ bool add_active_feature(EncodedFen& enc, int featureIndex) {
     return true;
 }
 
-struct SquareFeatureGeom {
-    int base   = 0;
-    int nTypes = 0;
-};
-
-const std::array<SquareFeatureGeom, SQUARE_NB>& square_feature_geoms() {
-    static const std::array<SquareFeatureGeom, SQUARE_NB> geoms = [] {
-        std::array<SquareFeatureGeom, SQUARE_NB> out{};
-        int                                      offset = 0;
-        for (int rank = 8; rank >= 1; --rank)
-        {
-            const bool edge         = rank == 1 || rank == 8;
-            const int  nTypes       = edge ? 5 : 6;
-            const int  featuresPerSq = nTypes * 2;
-            for (int file = 0; file < 8; ++file)
-            {
-                const Square sq = make_square(File(file), Rank(rank - 1));
-                out[std::size_t(sq)] = {offset + file * featuresPerSq, nTypes};
-            }
-            offset += 8 * featuresPerSq;
-        }
-        return out;
-    }();
-    return geoms;
-}
-
-int piece_index_no_pawn(PieceType pt) {
-    switch (pt)
-    {
-    case ROOK:
-        return 0;
-    case KNIGHT:
-        return 1;
-    case BISHOP:
-        return 2;
-    case QUEEN:
-        return 3;
-    case KING:
-        return 4;
-    default:
-        return -1;
-    }
-}
-
-int piece_index_all(PieceType pt) {
-    switch (pt)
-    {
-    case PAWN:
-        return 0;
-    case ROOK:
-        return 1;
-    case KNIGHT:
-        return 2;
-    case BISHOP:
-        return 3;
-    case QUEEN:
-        return 4;
-    case KING:
-        return 5;
-    default:
-        return -1;
-    }
-}
-
-bool feature_index_for_piece_square(Piece pc, Square sq, int& featureIndex) {
-    if (pc == NO_PIECE || sq == SQ_NONE)
-        return false;
-    if (!is_ok(sq))
-        return false;
-
-    const auto& geom = square_feature_geoms()[std::size_t(sq)];
-    const int   idx  = geom.nTypes == 5 ? piece_index_no_pawn(type_of(pc)) : piece_index_all(type_of(pc));
-    if (idx < 0)
-        return false;
-
-    const int colorOffset = color_of(pc) == BLACK ? geom.nTypes : 0;
-    featureIndex          = geom.base + colorOffset + idx;
-    return featureIndex >= 0 && featureIndex < 736;
-}
-
 bool encode_position_v2(const Position& pos, EncodedFen& out) {
     out = EncodedFen{};
 
@@ -1832,24 +1753,10 @@ const std::int16_t* positional_h1_feature_row(const Network::Impl& impl, int fea
     return impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos;
 }
 
-const std::int16_t* positional_h1_piece_row(const Network::Impl& impl, Piece pc, Square sq) {
-    int idx = -1;
-    if (!feature_index_for_piece_square(pc, sq, idx))
-        return nullptr;
-    return positional_h1_feature_row(impl, idx);
-}
-
 const std::int16_t* psqt_bucket_feature_row(const Network::Impl& impl, int featureIndex) {
     if (featureIndex < 0 || featureIndex >= 736)
         return nullptr;
     return impl.psqtBucketOutputWeight.data() + std::size_t(featureIndex) * kPieceBucketCount;
-}
-
-const std::int16_t* psqt_bucket_piece_row(const Network::Impl& impl, Piece pc, Square sq) {
-    int idx = -1;
-    if (!feature_index_for_piece_square(pc, sq, idx))
-        return nullptr;
-    return psqt_bucket_feature_row(impl, idx);
 }
 
 template<std::size_t RowCount>
@@ -2275,11 +2182,15 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
     // fields must be reviewed here to ensure they are explicitly rebuilt/copied.
     next.valid = false;
 
-    if (dirtyPiece.pc == NO_PIECE || dirtyPiece.from == SQ_NONE)
+    (void) move;
+    if (dirtyPiece.pc == NO_PIECE || dirtyPiece.opCount < 2
+        || std::size_t(dirtyPiece.opCount) > DirtyPiece::MaxOps)
+        return false;
+    if (dirtyPiece.pieceCountDelta < -1 || dirtyPiece.pieceCountDelta > 0)
+        return false;
+    if (dirtyPiece.ops[0].featureIndex == InvalidFeatureIndex)
         return false;
 
-    const bool castling = move.type_of() == CASTLING;
-    const bool capture  = dirtyPiece.remove_sq != SQ_NONE && !castling;
     const int  nextStmBlack = prev.stmBlack ^ 1;
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
@@ -2287,82 +2198,98 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
         ++metrics->advanceMovePreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceMovePreClipNs : nullptr);
-        const auto* fromPosRow  = positional_h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.from);
-        const auto* fromPsqtRow = psqt_bucket_piece_row(impl, dirtyPiece.pc, dirtyPiece.from);
-        if (!fromPosRow || !fromPsqtRow)
-            return false;
-
         bool ok = false;
-        if (castling)
+        switch (dirtyPiece.opCount)
         {
-            if (dirtyPiece.remove_sq == SQ_NONE || dirtyPiece.add_sq == SQ_NONE)
+        case 2:
+        {
+            const int op0 = int(dirtyPiece.ops[0].featureIndex);
+            const int op1 = int(dirtyPiece.ops[1].featureIndex);
+            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex)
                 return false;
 
-            const auto* kingToPosRow   = positional_h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.to);
-            const auto* rookFromPosRow = positional_h1_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
-            const auto* rookToPosRow   = positional_h1_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq);
-            const auto* kingToPsqtRow  = psqt_bucket_piece_row(impl, dirtyPiece.pc, dirtyPiece.to);
-            const auto* rookFromPsqtRow =
-              psqt_bucket_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
-            const auto* rookToPsqtRow =
-              psqt_bucket_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq);
+            const auto* pos0 = positional_h1_feature_row(impl, op0);
+            const auto* pos1 = positional_h1_feature_row(impl, op1);
+            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
+            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
+            if (!pos0 || !pos1 || !psqt0 || !psqt1)
+                return false;
+
+            ok = fused_positional_h1_update_rows_exact<2>(
+                   prev.positionalH1Pre, {pos0, pos1}, {-1, +1}, impl.positionalFtQuantizedOne,
+                   impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
+                   next.positionalH1Pre, next.positionalH1Clip)
+              && fused_psqt_bucket_update_rows_exact<2>(
+                   prev.psqtBucketAcc, {psqt0, psqt1}, {-1, +1}, next.psqtBucketAcc);
+            break;
+        }
+        case 3:
+        {
+            const int op0 = int(dirtyPiece.ops[0].featureIndex);
+            const int op1 = int(dirtyPiece.ops[1].featureIndex);
+            const int op2 = int(dirtyPiece.ops[2].featureIndex);
+            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
+                || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex)
+                return false;
+
+            const auto* pos0 = positional_h1_feature_row(impl, op0);
+            const auto* pos1 = positional_h1_feature_row(impl, op1);
+            const auto* pos2 = positional_h1_feature_row(impl, op2);
+            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
+            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
+            const auto* psqt2 = psqt_bucket_feature_row(impl, op2);
+            if (!pos0 || !pos1 || !pos2 || !psqt0 || !psqt1 || !psqt2)
+                return false;
+
+            ok = fused_positional_h1_update_rows_exact<3>(
+                   prev.positionalH1Pre, {pos0, pos1, pos2}, {-1, -1, +1},
+                   impl.positionalFtQuantizedOne,
+                   impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
+                   next.positionalH1Pre, next.positionalH1Clip)
+              && fused_psqt_bucket_update_rows_exact<3>(
+                   prev.psqtBucketAcc, {psqt0, psqt1, psqt2}, {-1, -1, +1}, next.psqtBucketAcc);
+            break;
+        }
+        case 4:
+        {
+            const int op0 = int(dirtyPiece.ops[0].featureIndex);
+            const int op1 = int(dirtyPiece.ops[1].featureIndex);
+            const int op2 = int(dirtyPiece.ops[2].featureIndex);
+            const int op3 = int(dirtyPiece.ops[3].featureIndex);
+            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
+                || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex
+                || dirtyPiece.ops[3].featureIndex == InvalidFeatureIndex)
+                return false;
+
+            const auto* pos0 = positional_h1_feature_row(impl, op0);
+            const auto* pos1 = positional_h1_feature_row(impl, op1);
+            const auto* pos2 = positional_h1_feature_row(impl, op2);
+            const auto* pos3 = positional_h1_feature_row(impl, op3);
+            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
+            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
+            const auto* psqt2 = psqt_bucket_feature_row(impl, op2);
+            const auto* psqt3 = psqt_bucket_feature_row(impl, op3);
+            if (!pos0 || !pos1 || !pos2 || !pos3 || !psqt0 || !psqt1 || !psqt2 || !psqt3)
+                return false;
 
             ok = fused_positional_h1_update_rows_exact<4>(
-                   prev.positionalH1Pre,
-                   {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow},
-                   {-1, +1, -1, +1}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                   prev.positionalH1Pre, {pos0, pos1, pos2, pos3}, {-1, +1, -1, +1},
+                   impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
                    impl.positionalFtShift, impl.positionalMulhrsK,
                    next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
-                   prev.psqtBucketAcc, {fromPsqtRow, kingToPsqtRow, rookFromPsqtRow, rookToPsqtRow},
-                   {-1, +1, -1, +1}, next.psqtBucketAcc);
+                   prev.psqtBucketAcc, {psqt0, psqt1, psqt2, psqt3}, {-1, +1, -1, +1},
+                   next.psqtBucketAcc);
+            break;
         }
-        else
-        {
-            const auto* toPosRow  = dirtyPiece.to != SQ_NONE
-                                      ? positional_h1_piece_row(impl, dirtyPiece.pc, dirtyPiece.to)
-                                      : (dirtyPiece.add_sq != SQ_NONE
-                                           ? positional_h1_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq)
-                                           : nullptr);
-            const auto* toPsqtRow = dirtyPiece.to != SQ_NONE
-                                      ? psqt_bucket_piece_row(impl, dirtyPiece.pc, dirtyPiece.to)
-                                      : (dirtyPiece.add_sq != SQ_NONE
-                                           ? psqt_bucket_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq)
-                                           : nullptr);
-            if (!toPosRow || !toPsqtRow)
-                return false;
-
-            if (capture)
-            {
-                const auto* capturePosRow =
-                  positional_h1_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
-                const auto* capturePsqtRow =
-                  psqt_bucket_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
-                ok = fused_positional_h1_update_rows_exact<3>(
-                       prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow},
-                       {-1, +1, -1}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.positionalFtShift, impl.positionalMulhrsK,
-                       next.positionalH1Pre, next.positionalH1Clip)
-                  && fused_psqt_bucket_update_rows_exact<3>(
-                       prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow, capturePsqtRow}, {-1, +1, -1},
-                       next.psqtBucketAcc);
-            }
-            else
-            {
-                ok = fused_positional_h1_update_rows_exact<2>(
-                       prev.positionalH1Pre, {fromPosRow, toPosRow}, {-1, +1},
-                       impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                       impl.positionalFtShift, impl.positionalMulhrsK,
-                       next.positionalH1Pre, next.positionalH1Clip)
-                  && fused_psqt_bucket_update_rows_exact<2>(
-                       prev.psqtBucketAcc, {fromPsqtRow, toPsqtRow}, {-1, +1}, next.psqtBucketAcc);
-            }
+        default:
+            return false;
         }
         if (!ok)
             return false;
     }
 
-    next.pieceCount = prev.pieceCount - (capture ? 1 : 0);
+    next.pieceCount = prev.pieceCount + dirtyPiece.pieceCountDelta;
     next.stmBlack   = nextStmBlack;
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key   = nextKey;

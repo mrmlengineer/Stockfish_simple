@@ -430,8 +430,7 @@ class Worker {
     struct NNUEXAccumulatorEntry {
         Eval::NNUEX::IncrementalState state{};
         Move                          move = Move::none();
-        DirtyPiece                    dirtyPiece{NO_PIECE, SQ_NONE, SQ_NONE, SQ_NONE, SQ_NONE,
-                                                 NO_PIECE, NO_PIECE};
+        DirtyPiece                    dirtyPiece{};
         Key                           key      = 0;
         bool                          computed = false;
         bool                          isNull   = false;
