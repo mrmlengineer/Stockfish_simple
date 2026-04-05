@@ -433,7 +433,6 @@ class Worker {
         DirtyPiece                    dirtyPiece{NO_PIECE, SQ_NONE, SQ_NONE, SQ_NONE, SQ_NONE,
                                                  NO_PIECE, NO_PIECE};
         Key                           key      = 0;
-        std::uint8_t                  stmBlack = 0;
         bool                          computed = false;
         bool                          isNull   = false;
     };

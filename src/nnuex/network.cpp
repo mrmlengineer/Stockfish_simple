@@ -1279,12 +1279,10 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                                               const DirtyPiece&      dirtyPiece,
                                               const IncrementalState& prev,
                                               Key                    nextKey,
-                                              int                    nextStmBlack,
                                               IncrementalState&      next);
 bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
                                                    const IncrementalState& prev,
                                                    Key                    nextKey,
-                                                   int                    nextStmBlack,
                                                    IncrementalState&      next);
 std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& impl,
                                                           const IncrementalState& state);
@@ -1628,22 +1626,18 @@ bool Network::advance_incremental_state_from_meta(Move                   move,
                                                   const DirtyPiece&      dirtyPiece,
                                                   const IncrementalState& prev,
                                                   Key                    nextKey,
-                                                  int                    nextStmBlack,
                                                   IncrementalState&      next) const {
     if (!initialized_ || impl_ == nullptr || !prev.valid)
         return false;
-    return advance_incremental_state_from_meta_impl(*impl_, move, dirtyPiece, prev, nextKey,
-                                                    nextStmBlack, next);
+    return advance_incremental_state_from_meta_impl(*impl_, move, dirtyPiece, prev, nextKey, next);
 }
 
 bool Network::advance_incremental_state_null_from_meta(const IncrementalState& prev,
                                                        Key                    nextKey,
-                                                       int                    nextStmBlack,
                                                        IncrementalState&      next) const {
     if (!initialized_ || impl_ == nullptr || !prev.valid)
         return false;
-    return advance_incremental_state_null_from_meta_impl(*impl_, prev, nextKey, nextStmBlack,
-                                                         next);
+    return advance_incremental_state_null_from_meta_impl(*impl_, prev, nextKey, next);
 }
 
 namespace {
@@ -1828,8 +1822,6 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
     }
 
     out.stmBlack = pos.side_to_move() == BLACK ? 1 : 0;
-    if (out.stmBlack && !add_active_feature(out, 736))
-        return false;
     fill_bucket_fields(out.pieceCount, out.stmBlack, out.bucket8, out.bucket16);
     return true;
 }
@@ -2030,12 +2022,16 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
         return false;
 
     std::array<const std::int16_t*, kMaxActiveFeatures> rows{};
+    std::size_t                                         rowCount = 0;
     for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
     {
         const int featureIndex = int(enc.activeFeatureIndices[i]);
         if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
             return false;
-        rows[i] = impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos;
+        if (featureIndex == 736)
+            continue;
+        rows[rowCount++] =
+          impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos;
     }
 
 #if NNUEX_HAS_AVX2_INTRINSICS
@@ -2056,7 +2052,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
 
-                for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+                for (std::size_t i = 0; i < rowCount; ++i)
                 {
                     const __m256i row = _mm256_loadu_si256(
                       reinterpret_cast<const __m256i*>(rows[i] + j));
@@ -2090,7 +2086,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
 
-                for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+                for (std::size_t i = 0; i < rowCount; ++i)
                 {
                     const __m256i row = _mm256_loadu_si256(
                       reinterpret_cast<const __m256i*>(rows[i] + j));
@@ -2130,7 +2126,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
     for (std::size_t j = 0; j < kExpectedH1Pos; ++j)
     {
         std::int16_t acc = impl.positionalHidden1Bias[j];
-        for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
+        for (std::size_t i = 0; i < rowCount; ++i)
             acc += rows[i][j];
 
         if (outH1Pre)
@@ -2270,7 +2266,6 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                                               const DirtyPiece&      dirtyPiece,
                                               const IncrementalState& prev,
                                               Key                    nextKey,
-                                              int                    nextStmBlack,
                                               IncrementalState&      next) {
     if (!prev.valid)
         return false;
@@ -2285,10 +2280,7 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
 
     const bool castling = move.type_of() == CASTLING;
     const bool capture  = dirtyPiece.remove_sq != SQ_NONE && !castling;
-    const int  stmSign  = nextStmBlack == prev.stmBlack ? 0 : (nextStmBlack ? +1 : -1);
-    const auto* stmRowPos = positional_h1_feature_row(impl, 736);
-    if (stmSign != 0 && !stmRowPos)
-        return false;
+    const int  nextStmBlack = prev.stmBlack ^ 1;
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     if (metrics)
@@ -2315,10 +2307,10 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
             const auto* rookToPsqtRow =
               psqt_bucket_piece_row(impl, dirtyPiece.add_pc, dirtyPiece.add_sq);
 
-            ok = fused_positional_h1_update_rows_exact<5>(
+            ok = fused_positional_h1_update_rows_exact<4>(
                    prev.positionalH1Pre,
-                   {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow, stmRowPos},
-                   {-1, +1, -1, +1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                   {fromPosRow, kingToPosRow, rookFromPosRow, rookToPosRow},
+                   {-1, +1, -1, +1}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
                    impl.positionalFtShift, impl.positionalMulhrsK,
                    next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
@@ -2346,9 +2338,9 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
                   positional_h1_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
                 const auto* capturePsqtRow =
                   psqt_bucket_piece_row(impl, dirtyPiece.remove_pc, dirtyPiece.remove_sq);
-                ok = fused_positional_h1_update_rows_exact<4>(
-                       prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow, stmRowPos},
-                       {-1, +1, -1, stmSign}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+                ok = fused_positional_h1_update_rows_exact<3>(
+                       prev.positionalH1Pre, {fromPosRow, toPosRow, capturePosRow},
+                       {-1, +1, -1}, impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
                        impl.positionalFtShift, impl.positionalMulhrsK,
                        next.positionalH1Pre, next.positionalH1Clip)
                   && fused_psqt_bucket_update_rows_exact<3>(
@@ -2357,8 +2349,8 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
             }
             else
             {
-                ok = fused_positional_h1_update_rows_exact<3>(
-                       prev.positionalH1Pre, {fromPosRow, toPosRow, stmRowPos}, {-1, +1, stmSign},
+                ok = fused_positional_h1_update_rows_exact<2>(
+                       prev.positionalH1Pre, {fromPosRow, toPosRow}, {-1, +1},
                        impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
                        impl.positionalFtShift, impl.positionalMulhrsK,
                        next.positionalH1Pre, next.positionalH1Clip)
@@ -2378,10 +2370,9 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
     return true;
 }
 
-bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
+bool advance_incremental_state_null_from_meta_impl(const Network::Impl&,
                                                    const IncrementalState& prev,
                                                    Key                    nextKey,
-                                                   int                    nextStmBlack,
                                                    IncrementalState&      next) {
     if (!prev.valid)
         return false;
@@ -2389,27 +2380,18 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&   impl,
     // Intentionally avoid `next = prev`: null moves only preserve the fields
     // that remain unchanged. Any new persistent IncrementalState fields must be
     // reviewed here before they can safely skip the full copy.
-    next.valid         = false;
-    next.pieceCount    = prev.pieceCount;
-    next.psqtBucketAcc = prev.psqtBucketAcc;
-
-    const int stmSign = nextStmBlack == prev.stmBlack ? 0 : (nextStmBlack ? +1 : -1);
-    const auto* stmRowPos = positional_h1_feature_row(impl, 736);
-    if (!stmRowPos)
-        return false;
+    next.valid            = false;
+    next.pieceCount       = prev.pieceCount;
+    next.psqtBucketAcc    = prev.psqtBucketAcc;
+    next.positionalH1Pre  = prev.positionalH1Pre;
+    next.positionalH1Clip = prev.positionalH1Clip;
+    const int nextStmBlack = prev.stmBlack ^ 1;
 
     RuntimeMetrics* metrics = gRuntimeMetricsSink;
     if (metrics)
         ++metrics->advanceNullPreClipCalls;
     {
         ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
-        if (!fused_positional_h1_update_rows_exact<1>(
-              prev.positionalH1Pre, {stmRowPos}, {stmSign}, impl.positionalFtQuantizedOne,
-              impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
-              next.positionalH1Pre, next.positionalH1Clip))
-        {
-            return false;
-        }
     }
 
     next.stmBlack = nextStmBlack;

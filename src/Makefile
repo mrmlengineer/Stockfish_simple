@@ -183,15 +183,16 @@ nnuex_runtime_options = yes
 # EVALFILE = <path>  (optional)
 #   Path to the .nnuex file to embed in the binary via incbin.
 #   The file is copied to the src directory before compilation.
-#   If unset, no file is staged and incbin embeds a 1-byte stub (external load only).
-EVALFILE =
+#   Defaults to the active project network; set empty explicitly to keep
+#   external-load-only behavior.
+EVALFILE ?= ../../export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex
 # NNUEX_H1_POSITIONAL = <int>  (optional)
 #   Compile-time positional hidden_1 width for the specialized NNUEX runtime.
 #   If EVALFILE is set, derive it from the .nnuex header unless explicitly overridden.
 #   If EVALFILE is unset, defaults to 384.
 NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; print(struct.unpack_from('<I', open(sys.argv[1], 'rb').read(52), 48)[0])" "$(abspath $(EVALFILE))"),384)
 # Must match the EvalFileDefaultNameNNUEX macro in nnuex/network.h (used by incbin).
-NNUEX_DEFAULT_NAME = qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex
+NNUEX_DEFAULT_NAME = export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex
 NNUEX_CONFIG_STAMP = .nnuex-build-config
 NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 NNUEX_CONFIG_OBJS = engine.o search.o nnuex/network.o
@@ -1066,6 +1067,7 @@ profileclean:
 net:
 ifneq ($(EVALFILE),)
 	@echo "Staging NNUEX network for embedding: $(EVALFILE)"
+	@mkdir -p "$(dir $(NNUEX_DEFAULT_NAME))"
 	@cp "$(EVALFILE)" "$(NNUEX_DEFAULT_NAME)"
 else
 	@echo "No EVALFILE set. The binary will attempt to load the network from disk at runtime."

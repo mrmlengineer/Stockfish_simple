@@ -26,7 +26,7 @@ class Position;
 namespace Stockfish::Eval::NNUEX {
 
 #define EvalFileDefaultNameNNUEX \
-  "qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex"
+  "export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex"
 
 inline constexpr const char* EvalFileDefaultName = EvalFileDefaultNameNNUEX;
 
@@ -118,11 +118,9 @@ class Network {
                                                                   const DirtyPiece&     dirtyPiece,
                                                                   const IncrementalState& prev,
                                                                   Key                   nextKey,
-                                                                  int                   nextStmBlack,
                                                                   IncrementalState&     next) const;
     bool                      advance_incremental_state_null_from_meta(const IncrementalState& prev,
                                                                        Key                   nextKey,
-                                                                       int                   nextStmBlack,
                                                                        IncrementalState&     next) const;
 
    private:

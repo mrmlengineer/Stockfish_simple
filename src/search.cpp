@@ -410,7 +410,6 @@ void Search::Worker::reset_nnuex_incremental_stack() {
     root.computed    = false;
     root.state.valid = false;
     root.key  = rootPos.key();
-    root.stmBlack = rootPos.side_to_move() == BLACK ? 1 : 0;
     auto& net = nnuex[numaAccessToken];
     const bool metricsEnabled = use_nnuex_metrics();
     if (metricsEnabled)
@@ -445,7 +444,6 @@ void Search::Worker::push_nnuex_incremental_move(const Position&  posAfterMove,
     next.move                 = move;
     next.dirtyPiece           = dirtyPiece;
     next.key                  = posAfterMove.key();
-    next.stmBlack             = posAfterMove.side_to_move() == BLACK ? 1 : 0;
     next.isNull               = false;
     const bool metricsEnabled = use_nnuex_metrics();
 
@@ -461,7 +459,7 @@ void Search::Worker::push_nnuex_incremental_move(const Position&  posAfterMove,
             {
                 ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceMoveNs : nullptr);
                 ok = net.advance_incremental_state_from_meta(move, dirtyPiece, prev.state, next.key,
-                                                             next.stmBlack, next.state);
+                                                             next.state);
             }
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.moveAdvanceFails;
@@ -497,7 +495,6 @@ void Search::Worker::push_nnuex_incremental_null(const Position& posAfterNull) {
     next.state.valid          = false;
     auto&      net            = nnuex[numaAccessToken];
     next.key                  = posAfterNull.key();
-    next.stmBlack             = posAfterNull.side_to_move() == BLACK ? 1 : 0;
     next.isNull               = true;
     const bool metricsEnabled = use_nnuex_metrics();
 
@@ -512,8 +509,7 @@ void Search::Worker::push_nnuex_incremental_null(const Position& posAfterNull) {
                 ++nnuexMetrics.nullAdvanceCalls;
             {
                 ScopedNsTimer timer(metricsEnabled ? &nnuexMetrics.advanceNullNs : nullptr);
-                ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.stmBlack,
-                                                                  next.state);
+                ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.state);
             }
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.nullAdvanceFails;
@@ -560,7 +556,6 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
             ++nnuexMetrics.evalIncrementalTopRebuildCalls;
         const bool rebuilt = net.build_incremental_state(pos, top.state);
         top.key      = pos.key();
-        top.stmBlack = pos.side_to_move() == BLACK ? 1 : 0;
         top.computed = rebuilt && top.state.valid && top.state.key == top.key;
         if (!top.computed)
         {
@@ -614,8 +609,7 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 ++nnuexMetrics.nullAdvanceCalls;
                 ++nnuexMetrics.replayAdvanceNullCalls;
             }
-            ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.stmBlack,
-                                                              next.state);
+            ok = net.advance_incremental_state_null_from_meta(prev.state, next.key, next.state);
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.nullAdvanceFails;
         }
@@ -627,7 +621,7 @@ bool Search::Worker::materialize_nnuex_incremental_top(const Position&          
                 ++nnuexMetrics.replayAdvanceMoveCalls;
             }
             ok = net.advance_incremental_state_from_meta(next.move, next.dirtyPiece, prev.state,
-                                                         next.key, next.stmBlack, next.state);
+                                                         next.key, next.state);
             if (!ok && metricsEnabled)
                 ++nnuexMetrics.moveAdvanceFails;
         }
@@ -2582,7 +2576,6 @@ Value Search::Worker::evaluate(const Position& pos) {
                         rebuilt = net.build_incremental_state(pos, top.state);
                     }
                     top.key      = pos.key();
-                    top.stmBlack = pos.side_to_move() == BLACK ? 1 : 0;
                     top.computed = rebuilt && top.state.valid && top.state.key == top.key;
                     if (!top.computed)
                     {
