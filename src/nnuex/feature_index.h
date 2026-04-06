@@ -1,5 +1,7 @@
 /*
-  Shared fixed feature-index mapping for the active NNUEX 737-input geometry.
+  Shared fixed board-feature mapping for the active NNUEX geometry.
+  Piece-square features occupy indices 0..735; slot 736 is reserved for the
+  legacy STM row and is not produced by this mapper.
 */
 
 #ifndef NNUEX_FEATURE_INDEX_H_INCLUDED
@@ -83,6 +85,7 @@ constexpr std::size_t piece_square_feature_slot(Piece pc, Square sq) {
 }
 
 inline const std::array<std::uint16_t, PIECE_NB * SQUARE_NB>& piece_square_feature_indices() {
+    constexpr int kBoardFeatureCount = 736;
     static const std::array<std::uint16_t, PIECE_NB * SQUARE_NB> indices = [] {
         std::array<std::uint16_t, PIECE_NB * SQUARE_NB> out{};
         for (auto& featureIndex : out)
@@ -105,7 +108,7 @@ inline const std::array<std::uint16_t, PIECE_NB * SQUARE_NB>& piece_square_featu
 
                 const int colorOffset = color_of(pc) == BLACK ? geom.nTypes : 0;
                 const int outIndex    = geom.base + colorOffset + idx;
-                if (outIndex < 0 || outIndex >= 736)
+                if (outIndex < 0 || outIndex >= kBoardFeatureCount)
                     continue;
 
                 out[piece_square_feature_slot(pc, sq)] = static_cast<std::uint16_t>(outIndex);

@@ -806,6 +806,8 @@ void Position::do_move(Move                      m,
 
         Square rfrom, rto;
         do_castling<true>(us, from, to, rfrom, rto, &dp);
+        if (dp.opCount == 0)
+            dirtyFeatureOk = false;
 
         k ^= Zobrist::psq[captured][rfrom] ^ Zobrist::psq[captured][rto];
         st->nonPawnKey[us] ^= Zobrist::psq[captured][rfrom] ^ Zobrist::psq[captured][rto];
@@ -1151,11 +1153,13 @@ void Position::do_castling(Color             us,
         {
             dp->invalidate();
             assert(false);
-            return;
         }
-        dp->add_operation(kingToFeature);
-        dp->add_operation(rookFromFeature);
-        dp->add_operation(rookToFeature);
+        else
+        {
+            dp->add_operation(kingToFeature);
+            dp->add_operation(rookFromFeature);
+            dp->add_operation(rookToFeature);
+        }
     }
 
     // Remove both pieces first since squares could overlap in Chess960

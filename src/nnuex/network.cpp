@@ -50,7 +50,8 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
-constexpr std::uint32_t kExpectedInputSize   = 737;
+constexpr std::uint16_t kReservedStmFeatureIndex = 736;
+constexpr std::uint32_t kExpectedInputSize       = kReservedStmFeatureIndex + 1;
 constexpr std::uint32_t kExpectedBucketCount = 16;
 constexpr std::uint32_t kExpectedH1Total     = NNUEX_H1_POSITIONAL;
 constexpr std::uint32_t kExpectedH1Psqt      = 0;
@@ -60,7 +61,7 @@ constexpr std::uint32_t kExpectedPosH2       = 16;
 constexpr std::uint32_t kExpectedPsqtH3      = 0;
 constexpr std::uint32_t kExpectedPosH3       = 32;
 constexpr std::uint32_t kExpectedOutputs     = 2;
-constexpr std::size_t   kMaxActiveFeatures   = 33;  // 32 pieces + side-to-move bit
+constexpr std::size_t   kMaxActiveFeatures   = 32;  // board-piece features only; STM is bucket-only
 constexpr std::size_t   kPieceBucketCount    = 8;
 
 static_assert((NNUEX_H1_POSITIONAL % 16) == 0, "NNUEX_H1_POSITIONAL must be divisible by 16");
@@ -1666,6 +1667,24 @@ bool load_payload_quantized(const std::vector<std::uint8_t>& fileBytes, Network:
         return false;
     }
 
+    const auto psqtRowBegin =
+      impl.psqtBucketOutputWeight.begin() + std::size_t(kReservedStmFeatureIndex) * kPieceBucketCount;
+    const auto psqtRowEnd = psqtRowBegin + kPieceBucketCount;
+    if (std::any_of(psqtRowBegin, psqtRowEnd, [](std::int16_t v) { return v != 0; }))
+    {
+        err = "Reserved STM PSQT row 736 must be all-zero for the bucket-only runtime";
+        return false;
+    }
+
+    const auto posRowBegin =
+      impl.positionalHidden1Weight.begin() + std::size_t(kReservedStmFeatureIndex) * kExpectedH1Pos;
+    const auto posRowEnd = posRowBegin + kExpectedH1Pos;
+    if (std::any_of(posRowBegin, posRowEnd, [](std::int16_t v) { return v != 0; }))
+    {
+        err = "Reserved STM positional row 736 must be all-zero for the bucket-only runtime";
+        return false;
+    }
+
     for (auto& b : impl.positionalBuckets)
     {
         if (!read_raw_array<std::int8_t>(rd, b.h2Weight.size(), b.h2Weight)
@@ -1754,7 +1773,7 @@ const std::int16_t* positional_h1_feature_row(const Network::Impl& impl, int fea
 }
 
 const std::int16_t* psqt_bucket_feature_row(const Network::Impl& impl, int featureIndex) {
-    if (featureIndex < 0 || featureIndex >= 736)
+    if (featureIndex < 0 || featureIndex >= int(kReservedStmFeatureIndex))
         return nullptr;
     return impl.psqtBucketOutputWeight.data() + std::size_t(featureIndex) * kPieceBucketCount;
 }
@@ -1935,7 +1954,7 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
         const int featureIndex = int(enc.activeFeatureIndices[i]);
         if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
             return false;
-        if (featureIndex == 736)
+        if (featureIndex == int(kReservedStmFeatureIndex))
             continue;
         rows[rowCount++] =
           impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos;
@@ -2081,7 +2100,7 @@ std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl,
         for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
         {
             const std::size_t featureIndex = enc.activeFeatureIndices[i];
-            if (featureIndex == 736)
+            if (featureIndex == kReservedStmFeatureIndex)
                 continue;
             psqtUnsignedQFt +=
               impl.psqtBucketOutputWeight[featureIndex * kPieceBucketCount + std::size_t(enc.bucket8)];
@@ -2150,7 +2169,7 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
     for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
     {
         const int featureIndex = int(enc.activeFeatureIndices[i]);
-        if (featureIndex == 736)
+        if (featureIndex == int(kReservedStmFeatureIndex))
             continue;
         const auto* row = psqt_bucket_feature_row(impl, featureIndex);
         if (!row)
