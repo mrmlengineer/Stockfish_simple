@@ -80,8 +80,6 @@ HEADERS = benchmark.h bitboard.h evaluate.h misc.h movegen.h movepick.h history.
 
 OBJS = $(SRCS:.cpp=.o)
 
-VPATH = syzygy:nnuex
-
 ### ==========================================================================
 ### Section 2. High-level Configuration
 ### ==========================================================================
@@ -194,7 +192,10 @@ NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; p
 NNUEX_DEFAULT_NAME = qat_b16_exact_2500_alt_psqt50_dual_positional_pairreg_i16ft256_positional_i16_ft256_psqt256_quantized_weights.nnuex
 NNUEX_CONFIG_STAMP = .nnuex-build-config
 NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
-NNUEX_CONFIG_OBJS = engine.o search.o nnuex/network.o
+# NNUEX_H1_POSITIONAL and NNUEX_FIXED_MODE are injected via CXXFLAGS, so any
+# configuration change can invalidate every translation unit, not just the
+# obvious NNUEX runtime objects.
+NNUEX_CONFIG_OBJS = $(OBJS)
 
 ifneq ($(shell which clang-format-20 2> /dev/null),)
 	CLANG-FORMAT = clang-format-20
