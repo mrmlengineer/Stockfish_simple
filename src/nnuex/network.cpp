@@ -1291,6 +1291,14 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
 
 }  // namespace
 
+// Per-feature pointer bundle: resolves one feature index to both weight domains.
+// Used by the incremental move-advance path to avoid separate positional/PSQT
+// row lookups for the same dirty operation.
+struct FeatureBundle {
+    const std::int16_t* positionalH1 = nullptr;
+    const std::int16_t* psqt8        = nullptr;
+};
+
 struct Network::Impl {
     Header header{};
     bool   metadataJsonPresent = false;
@@ -1449,6 +1457,7 @@ bool Network::load_from_file(const std::string& path, std::string& err) {
     if (!load_payload_quantized(bytes, *newImpl, err))
         return false;
 
+
     newImpl->metadataJsonPresent =
       (newImpl->header.flags & 1u) != 0 && newImpl->header.metadataJsonBytes > 0;
 
@@ -1501,6 +1510,7 @@ bool Network::load_from_memory(const unsigned char* data, std::size_t size, std:
         return false;
     if (!load_payload_quantized(bytes, *newImpl, err))
         return false;
+
 
     newImpl->metadataJsonPresent =
       (newImpl->header.flags & 1u) != 0 && newImpl->header.metadataJsonBytes > 0;
@@ -1766,16 +1776,19 @@ bool encode_position_v2(const Position& pos, EncodedFen& out) {
     return true;
 }
 
-const std::int16_t* positional_h1_feature_row(const Network::Impl& impl, int featureIndex) {
-    if (featureIndex < 0 || featureIndex >= int(kExpectedInputSize))
-        return nullptr;
-    return impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos;
-}
-
 const std::int16_t* psqt_bucket_feature_row(const Network::Impl& impl, int featureIndex) {
     if (featureIndex < 0 || featureIndex >= int(kReservedStmFeatureIndex))
         return nullptr;
     return impl.psqtBucketOutputWeight.data() + std::size_t(featureIndex) * kPieceBucketCount;
+}
+
+FeatureBundle compute_feature_bundle(const Network::Impl& impl, int featureIndex) {
+    if (featureIndex < 0 || featureIndex >= int(kReservedStmFeatureIndex))
+        return {};
+    return {
+        impl.positionalHidden1Weight.data() + std::size_t(featureIndex) * kExpectedH1Pos,
+        impl.psqtBucketOutputWeight.data()  + std::size_t(featureIndex) * kPieceBucketCount
+    };
 }
 
 template<std::size_t RowCount>
@@ -2222,82 +2235,70 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
         {
         case 2:
         {
-            const int op0 = int(dirtyPiece.ops[0].featureIndex);
-            const int op1 = int(dirtyPiece.ops[1].featureIndex);
             if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex)
                 return false;
 
-            const auto* pos0 = positional_h1_feature_row(impl, op0);
-            const auto* pos1 = positional_h1_feature_row(impl, op1);
-            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
-            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
-            if (!pos0 || !pos1 || !psqt0 || !psqt1)
+            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+            if (!b0.positionalH1 || !b1.positionalH1)
                 return false;
 
             ok = fused_positional_h1_update_rows_exact<2>(
-                   prev.positionalH1Pre, {pos0, pos1}, {-1, +1}, impl.positionalFtQuantizedOne,
+                   prev.positionalH1Pre, {b0.positionalH1, b1.positionalH1}, {-1, +1},
+                   impl.positionalFtQuantizedOne,
                    impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
                    next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<2>(
-                   prev.psqtBucketAcc, {psqt0, psqt1}, {-1, +1}, next.psqtBucketAcc);
+                   prev.psqtBucketAcc, {b0.psqt8, b1.psqt8}, {-1, +1}, next.psqtBucketAcc);
             break;
         }
         case 3:
         {
-            const int op0 = int(dirtyPiece.ops[0].featureIndex);
-            const int op1 = int(dirtyPiece.ops[1].featureIndex);
-            const int op2 = int(dirtyPiece.ops[2].featureIndex);
             if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
                 || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex)
                 return false;
 
-            const auto* pos0 = positional_h1_feature_row(impl, op0);
-            const auto* pos1 = positional_h1_feature_row(impl, op1);
-            const auto* pos2 = positional_h1_feature_row(impl, op2);
-            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
-            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
-            const auto* psqt2 = psqt_bucket_feature_row(impl, op2);
-            if (!pos0 || !pos1 || !pos2 || !psqt0 || !psqt1 || !psqt2)
+            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+            const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
+            if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1)
                 return false;
 
             ok = fused_positional_h1_update_rows_exact<3>(
-                   prev.positionalH1Pre, {pos0, pos1, pos2}, {-1, -1, +1},
+                   prev.positionalH1Pre,
+                   {b0.positionalH1, b1.positionalH1, b2.positionalH1}, {-1, -1, +1},
                    impl.positionalFtQuantizedOne,
                    impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
                    next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<3>(
-                   prev.psqtBucketAcc, {psqt0, psqt1, psqt2}, {-1, -1, +1}, next.psqtBucketAcc);
+                   prev.psqtBucketAcc, {b0.psqt8, b1.psqt8, b2.psqt8}, {-1, -1, +1},
+                   next.psqtBucketAcc);
             break;
         }
         case 4:
         {
-            const int op0 = int(dirtyPiece.ops[0].featureIndex);
-            const int op1 = int(dirtyPiece.ops[1].featureIndex);
-            const int op2 = int(dirtyPiece.ops[2].featureIndex);
-            const int op3 = int(dirtyPiece.ops[3].featureIndex);
             if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
                 || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex
                 || dirtyPiece.ops[3].featureIndex == InvalidFeatureIndex)
                 return false;
 
-            const auto* pos0 = positional_h1_feature_row(impl, op0);
-            const auto* pos1 = positional_h1_feature_row(impl, op1);
-            const auto* pos2 = positional_h1_feature_row(impl, op2);
-            const auto* pos3 = positional_h1_feature_row(impl, op3);
-            const auto* psqt0 = psqt_bucket_feature_row(impl, op0);
-            const auto* psqt1 = psqt_bucket_feature_row(impl, op1);
-            const auto* psqt2 = psqt_bucket_feature_row(impl, op2);
-            const auto* psqt3 = psqt_bucket_feature_row(impl, op3);
-            if (!pos0 || !pos1 || !pos2 || !pos3 || !psqt0 || !psqt1 || !psqt2 || !psqt3)
+            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+            const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
+            const auto b3 = compute_feature_bundle(impl, int(dirtyPiece.ops[3].featureIndex));
+            if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1 || !b3.positionalH1)
                 return false;
 
             ok = fused_positional_h1_update_rows_exact<4>(
-                   prev.positionalH1Pre, {pos0, pos1, pos2, pos3}, {-1, +1, -1, +1},
+                   prev.positionalH1Pre,
+                   {b0.positionalH1, b1.positionalH1, b2.positionalH1, b3.positionalH1},
+                   {-1, +1, -1, +1},
                    impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
                    impl.positionalFtShift, impl.positionalMulhrsK,
                    next.positionalH1Pre, next.positionalH1Clip)
               && fused_psqt_bucket_update_rows_exact<4>(
-                   prev.psqtBucketAcc, {psqt0, psqt1, psqt2, psqt3}, {-1, +1, -1, +1},
+                   prev.psqtBucketAcc,
+                   {b0.psqt8, b1.psqt8, b2.psqt8, b3.psqt8}, {-1, +1, -1, +1},
                    next.psqtBucketAcc);
             break;
         }
