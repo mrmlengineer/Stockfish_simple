@@ -2493,6 +2493,14 @@ TimePoint Search::Worker::elapsed() const {
 TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elapsed_time(); }
 
 Value Search::Worker::evaluate(const Position& pos) {
+#ifdef NNUEX_FIXED_MODE
+    auto& net = nnuex[numaAccessToken];
+
+    NNUEX::IncrementalState* inc = nullptr;
+    materialize_nnuex_incremental_top(pos, inc);
+
+    return NNUEX::evaluate_fixed_auto(net, pos, inc, optimism[pos.side_to_move()]);
+#else
     const bool incrementalRequested = use_nnuex_incremental_stack();
     auto&      net = nnuex[numaAccessToken];
     const bool parityCheckEnabled = nnuexParityEnabledCached;
@@ -2638,6 +2646,7 @@ Value Search::Worker::evaluate(const Position& pos) {
         return NNUEX::evaluate(net, pos, optimism[pos.side_to_move()], incrementalRequested);
     }
     return NNUEX::evaluate(net, pos, optimism[pos.side_to_move()], incrementalRequested);
+#endif
 }
 
 namespace {

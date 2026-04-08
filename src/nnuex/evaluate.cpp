@@ -15,32 +15,6 @@
 
 namespace Stockfish::Eval::NNUEX {
 
-namespace {
-
-Value fallback_simple_eval(const Position& pos) {
-    return std::clamp(Value(Eval::simple_eval(pos)), VALUE_TB_LOSS_IN_MAX_PLY + 1,
-                      VALUE_TB_WIN_IN_MAX_PLY - 1);
-}
-
-Value apply_outer_scaling(const Position& pos, const Evaluation& e, int optimism) {
-    Value psqt       = e.psqt;
-    Value positional = e.positional;
-    Value nnue       = (125 * psqt + 131 * positional) / 128;
-
-    int nnueComplexity = std::abs(int(psqt) - int(positional));
-    optimism += optimism * nnueComplexity / 476;
-    nnue -= nnue * nnueComplexity / 18236;
-
-    int material = 534 * pos.count<PAWN>() + pos.non_pawn_material();
-    int v        = (nnue * (77871 + material) + optimism * (7191 + material)) / 77871;
-
-    v -= v * pos.rule50_count() / 199;
-    v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
-    return Value(v);
-}
-
-}  // namespace
-
 Value evaluate(const Network& net, const Position& pos, int optimism, bool incrementalRequested) {
     return evaluate(net, pos, nullptr, optimism, incrementalRequested);
 }
@@ -52,8 +26,8 @@ Value evaluate(const Network&          net,
                bool                    /*incrementalRequested*/) {
     auto out = incrementalState ? net.evaluate(*incrementalState) : net.evaluate(pos);
     if (!out.has_value())
-        return fallback_simple_eval(pos);
-    return apply_outer_scaling(pos, *out, optimism);
+        return detail::fallback_simple_eval(pos);
+    return detail::apply_outer_scaling(pos, *out, optimism);
 }
 
 std::string trace(Position& pos, const Network& net) {
