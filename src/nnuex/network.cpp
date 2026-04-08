@@ -74,6 +74,109 @@ constexpr std::uint32_t kNnuexVersion             = 1;
 constexpr char          kNnuexMagic[8]            = {'C', 'D', 'N', 'N', 'U', 'E', 'X', '1'};
 constexpr int           kDefaultEngineValueOutputScale = 1;
 
+#if NNUEX_HAS_AVX2_INTRINSICS
+constexpr std::size_t kH1VectorWidth      = 16;
+constexpr std::size_t kH1BlockedVecCount  = 4;
+constexpr std::size_t kH1BlockedWidth     = kH1VectorWidth * kH1BlockedVecCount;
+
+template<std::size_t BlockVecCount>
+inline void store_h1_pre_block(std::int16_t* dst, std::size_t base, const __m256i (&acc)[BlockVecCount]) {
+    for (std::size_t block = 0; block < BlockVecCount; ++block)
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + base + block * kH1VectorWidth), acc[block]);
+}
+
+template<std::size_t BlockVecCount>
+inline void clip_pack_store_h1_block_mulhrs(std::uint8_t* dst,
+                                            std::size_t   base,
+                                            const __m256i (&acc)[BlockVecCount],
+                                            const __m256i& zero16,
+                                            const __m256i& mulhrsKVec,
+                                            const __m256i& hiddenQ16) {
+    for (std::size_t block = 0; block < BlockVecCount; ++block)
+    {
+        const __m256i xPos16 = _mm256_max_epi16(acc[block], zero16);
+        __m256i       q16    = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
+        q16                  = _mm256_min_epi16(q16, hiddenQ16);
+
+        const __m128i lo = _mm256_castsi256_si128(q16);
+        const __m128i hi = _mm256_extracti128_si256(q16, 1);
+        const __m128i p8 = _mm_packus_epi16(lo, hi);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + base + block * kH1VectorWidth), p8);
+    }
+}
+
+template<std::size_t BlockVecCount>
+inline void clip_pack_store_h1_block_shift(std::uint8_t* dst,
+                                           std::size_t   base,
+                                           const __m256i (&acc)[BlockVecCount],
+                                           const __m256i& zero16,
+                                           const __m256i& hiddenQ32,
+                                           const __m256i& half32,
+                                           const __m128i& shift128) {
+    for (std::size_t block = 0; block < BlockVecCount; ++block)
+    {
+        const __m256i xPos16 = _mm256_max_epi16(acc[block], zero16);
+        const __m128i xLo16  = _mm256_castsi256_si128(xPos16);
+        const __m128i xHi16  = _mm256_extracti128_si256(xPos16, 1);
+        const __m256i xLo32  = _mm256_cvtepi16_epi32(xLo16);
+        const __m256i xHi32  = _mm256_cvtepi16_epi32(xHi16);
+
+        __m256i qLo = _mm256_srl_epi32(
+          _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
+        qLo = _mm256_min_epu32(qLo, hiddenQ32);
+        __m256i qHi = _mm256_srl_epi32(
+          _mm256_add_epi32(_mm256_mullo_epi32(xHi32, hiddenQ32), half32), shift128);
+        qHi = _mm256_min_epu32(qHi, hiddenQ32);
+
+        const __m128i pLo16 =
+          _mm_packus_epi32(_mm256_castsi256_si128(qLo), _mm256_extracti128_si256(qLo, 1));
+        const __m128i pHi16 =
+          _mm_packus_epi32(_mm256_castsi256_si128(qHi), _mm256_extracti128_si256(qHi, 1));
+        const __m128i p8 = _mm_packus_epi16(pLo16, pHi16);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + base + block * kH1VectorWidth), p8);
+    }
+}
+
+template<std::size_t BlockVecCount>
+inline void add_h1_rows_block(__m256i (&acc)[BlockVecCount],
+                              const std::int16_t* const* rows,
+                              std::size_t                rowCount,
+                              std::size_t                base) {
+    for (std::size_t i = 0; i < rowCount; ++i)
+    {
+        const auto* rowBase = rows[i] + base;
+        for (std::size_t block = 0; block < BlockVecCount; ++block)
+        {
+            const __m256i row = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+              rowBase + block * kH1VectorWidth));
+            acc[block] = _mm256_add_epi16(acc[block], row);
+        }
+    }
+}
+
+template<std::size_t BlockVecCount, std::size_t RowCount>
+inline void add_signed_h1_rows_block(__m256i (&acc)[BlockVecCount],
+                                     const std::array<const std::int16_t*, RowCount>& rows,
+                                     const std::array<int, RowCount>&                 signs,
+                                     std::size_t                                      base) {
+    for (std::size_t i = 0; i < RowCount; ++i)
+    {
+        const int sign = signs[i];
+        if (!sign)
+            continue;
+
+        const auto* rowBase = rows[i] + base;
+        for (std::size_t block = 0; block < BlockVecCount; ++block)
+        {
+            const __m256i row = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+              rowBase + block * kH1VectorWidth));
+            acc[block] = sign > 0 ? _mm256_add_epi16(acc[block], row)
+                                  : _mm256_sub_epi16(acc[block], row);
+        }
+    }
+}
+#endif
+
 #ifndef NNUEX_FIXED_MODE
 thread_local RuntimeMetrics* gRuntimeMetricsSink = nullptr;
 #else
@@ -1820,8 +1923,21 @@ bool fused_positional_h1_update_rows_exact(
             //                    = (a * hiddenQ + ftQ/2) >> ftShift   (bit-exact)
             const __m256i mulhrsKVec = _mm256_set1_epi16(mulhrsK);
             const __m256i hiddenQ16  = _mm256_set1_epi16(static_cast<std::int16_t>(hiddenQuantizedOne));
+            std::size_t    j         = 0;
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            for (; j + kH1BlockedWidth <= kExpectedH1Pos; j += kH1BlockedWidth)
+            {
+                __m256i acc[kH1BlockedVecCount];
+                for (std::size_t block = 0; block < kH1BlockedVecCount; ++block)
+                    acc[block] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+                      prevH1Pre.data() + j + block * kH1VectorWidth));
+
+                add_signed_h1_rows_block<kH1BlockedVecCount>(acc, rows, signs, j);
+                store_h1_pre_block(nextH1Pre.data(), j, acc);
+                clip_pack_store_h1_block_mulhrs(nextH1Clip.data(), j, acc, zero16, mulhrsKVec, hiddenQ16);
+            }
+
+            for (; j < kExpectedH1Pos; j += kH1VectorWidth)
             {
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
@@ -1840,12 +1956,10 @@ bool fused_positional_h1_update_rows_exact(
 
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
 
-                // ReLU + quantize + clamp, entirely in i16
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-                __m256i q16 = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
-                q16 = _mm256_min_epi16(q16, hiddenQ16);
+                __m256i       q16    = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
+                q16                  = _mm256_min_epi16(q16, hiddenQ16);
 
-                // Pack i16 → u8 (16 values → 16 bytes)
                 const __m128i lo = _mm256_castsi256_si128(q16);
                 const __m128i hi = _mm256_extracti128_si256(q16, 1);
                 const __m128i p8 = _mm_packus_epi16(lo, hi);
@@ -1860,8 +1974,22 @@ bool fused_positional_h1_update_rows_exact(
             // Fallback: i16 accumulation + i32 widening shift clip/quantize.
             // Used when mulhrsK overflows i16.
             const __m128i shift128 = _mm_cvtsi32_si128(ftShift);
+            std::size_t    j       = 0;
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            for (; j + kH1BlockedWidth <= kExpectedH1Pos; j += kH1BlockedWidth)
+            {
+                __m256i acc[kH1BlockedVecCount];
+                for (std::size_t block = 0; block < kH1BlockedVecCount; ++block)
+                    acc[block] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+                      prevH1Pre.data() + j + block * kH1VectorWidth));
+
+                add_signed_h1_rows_block<kH1BlockedVecCount>(acc, rows, signs, j);
+                store_h1_pre_block(nextH1Pre.data(), j, acc);
+                clip_pack_store_h1_block_shift(
+                  nextH1Clip.data(), j, acc, zero16, hiddenQ32, half32, shift128);
+            }
+
+            for (; j < kExpectedH1Pos; j += kH1VectorWidth)
             {
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(prevH1Pre.data() + j));
@@ -1881,10 +2009,10 @@ bool fused_positional_h1_update_rows_exact(
                 _mm256_storeu_si256(reinterpret_cast<__m256i*>(nextH1Pre.data() + j), acc);
 
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-                const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
-                const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
-                const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
-                const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+                const __m128i xLo16  = _mm256_castsi256_si128(xPos16);
+                const __m128i xHi16  = _mm256_extracti128_si256(xPos16, 1);
+                const __m256i xLo32  = _mm256_cvtepi16_epi32(xLo16);
+                const __m256i xHi32  = _mm256_cvtepi16_epi32(xHi16);
 
                 __m256i qLo = _mm256_srl_epi32(
                   _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
@@ -1985,8 +2113,22 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
             // i16-only clip/quantize via vpmulhrsw: no i32 widening needed.
             const __m256i mulhrsKVec = _mm256_set1_epi16(impl.positionalMulhrsK);
             const __m256i hiddenQ16  = _mm256_set1_epi16(static_cast<std::int16_t>(hiddenQuantizedOne));
+            std::size_t    j         = 0;
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            for (; j + kH1BlockedWidth <= kExpectedH1Pos; j += kH1BlockedWidth)
+            {
+                __m256i acc[kH1BlockedVecCount];
+                for (std::size_t block = 0; block < kH1BlockedVecCount; ++block)
+                    acc[block] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+                      impl.positionalHidden1Bias.data() + j + block * kH1VectorWidth));
+
+                add_h1_rows_block(acc, rows.data(), rowCount, j);
+                if (outH1Pre)
+                    store_h1_pre_block(outH1Pre->data(), j, acc);
+                clip_pack_store_h1_block_mulhrs(outH1Clip.data(), j, acc, zero16, mulhrsKVec, hiddenQ16);
+            }
+
+            for (; j < kExpectedH1Pos; j += kH1VectorWidth)
             {
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
@@ -2001,10 +2143,9 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                 if (outH1Pre)
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
 
-                // ReLU + quantize + clamp, entirely in i16
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-                __m256i q16 = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
-                q16 = _mm256_min_epi16(q16, hiddenQ16);
+                __m256i       q16    = _mm256_mulhrs_epi16(xPos16, mulhrsKVec);
+                q16                  = _mm256_min_epi16(q16, hiddenQ16);
 
                 const __m128i lo = _mm256_castsi256_si128(q16);
                 const __m128i hi = _mm256_extracti128_si256(q16, 1);
@@ -2019,8 +2160,23 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
         {
             // Fallback: i16 accumulation + i32 widening shift clip/quantize.
             const __m128i shift128 = _mm_cvtsi32_si128(impl.positionalFtShift);
+            std::size_t    j       = 0;
 
-            for (std::size_t j = 0; j < kExpectedH1Pos; j += 16)
+            for (; j + kH1BlockedWidth <= kExpectedH1Pos; j += kH1BlockedWidth)
+            {
+                __m256i acc[kH1BlockedVecCount];
+                for (std::size_t block = 0; block < kH1BlockedVecCount; ++block)
+                    acc[block] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
+                      impl.positionalHidden1Bias.data() + j + block * kH1VectorWidth));
+
+                add_h1_rows_block(acc, rows.data(), rowCount, j);
+                if (outH1Pre)
+                    store_h1_pre_block(outH1Pre->data(), j, acc);
+                clip_pack_store_h1_block_shift(
+                  outH1Clip.data(), j, acc, zero16, hiddenQ32, half32, shift128);
+            }
+
+            for (; j < kExpectedH1Pos; j += kH1VectorWidth)
             {
                 __m256i acc = _mm256_loadu_si256(
                   reinterpret_cast<const __m256i*>(impl.positionalHidden1Bias.data() + j));
@@ -2036,10 +2192,10 @@ bool build_alt_positional_h1_sparse_exact(const Network::Impl& impl,
                     _mm256_storeu_si256(reinterpret_cast<__m256i*>(outH1Pre->data() + j), acc);
 
                 const __m256i xPos16 = _mm256_max_epi16(acc, zero16);
-                const __m128i xLo16 = _mm256_castsi256_si128(xPos16);
-                const __m128i xHi16 = _mm256_extracti128_si256(xPos16, 1);
-                const __m256i xLo32 = _mm256_cvtepi16_epi32(xLo16);
-                const __m256i xHi32 = _mm256_cvtepi16_epi32(xHi16);
+                const __m128i xLo16  = _mm256_castsi256_si128(xPos16);
+                const __m128i xHi16  = _mm256_extracti128_si256(xPos16, 1);
+                const __m256i xLo32  = _mm256_cvtepi16_epi32(xLo16);
+                const __m256i xHi32  = _mm256_cvtepi16_epi32(xHi16);
 
                 __m256i qLo = _mm256_srl_epi32(
                   _mm256_add_epi32(_mm256_mullo_epi32(xLo32, hiddenQ32), half32), shift128);
