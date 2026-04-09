@@ -42,22 +42,11 @@ inline Value apply_outer_scaling(const Position& pos, const Evaluation& e, int o
 
 }  // namespace detail
 
-Value       evaluate(const Network& net, const Position& pos, int optimism, bool incrementalRequested);
+Value       evaluate(const Network& net, const Position& pos, int optimism);
 Value       evaluate(const Network&         net,
                      const Position&        pos,
                      const IncrementalState* incrementalState,
-                     int                    optimism,
-                     bool                   incrementalRequested);
-
-inline Value evaluate_fixed_auto(const Network&          net,
-                                 const Position&         pos,
-                                 const IncrementalState* incrementalState,
-                                 int                     optimism) {
-    auto out = incrementalState ? net.evaluate(*incrementalState) : net.evaluate(pos);
-    if (!out.has_value())
-        return detail::fallback_simple_eval(pos);
-    return detail::apply_outer_scaling(pos, *out, optimism);
-}
+                     int                    optimism);
 
 std::string trace(Position& pos, const Network& net);
 

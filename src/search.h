@@ -262,66 +262,6 @@ class NullSearchManager: public ISearchManager {
     void check_time(Search::Worker&) override {}
 };
 
-struct NNUEXMetrics {
-    std::uint64_t evalCalls                        = 0;
-    std::uint64_t evalIncrementalRequested         = 0;
-    std::uint64_t evalIncrementalStateUsed         = 0;
-    std::uint64_t evalIncrementalStateMiss         = 0;
-    std::uint64_t evalIncrementalTopMaterializeCalls = 0;
-    std::uint64_t evalIncrementalTopDirectHits       = 0;
-    std::uint64_t evalIncrementalTopReplayCalls      = 0;
-    std::uint64_t evalIncrementalTopReplaySteps      = 0;
-    std::uint64_t evalIncrementalTopRebuildCalls   = 0;
-    std::uint64_t evalIncrementalTopRebuildFails   = 0;
-    std::uint64_t wrapperCalls                     = 0;
-    std::uint64_t wrapperFullCalls                 = 0;
-    std::uint64_t wrapperIncrementalCalls          = 0;
-    std::uint64_t rootBuildCalls                   = 0;
-    std::uint64_t rootBuildFails                   = 0;
-    std::uint64_t moveAdvanceCalls                 = 0;
-    std::uint64_t moveAdvanceFails                 = 0;
-    std::uint64_t moveFallbackBuildCalls           = 0;
-    std::uint64_t moveFallbackBuildFails           = 0;
-    std::uint64_t nullAdvanceCalls                 = 0;
-    std::uint64_t nullAdvanceFails                 = 0;
-    std::uint64_t nullFallbackBuildCalls           = 0;
-    std::uint64_t nullFallbackBuildFails           = 0;
-    std::uint64_t doMoveCalls                      = 0;
-    std::uint64_t doNullMoveCalls                  = 0;
-    std::uint64_t undoMoveCalls                    = 0;
-    std::uint64_t undoNullMoveCalls                = 0;
-    std::uint64_t parityExtraIncEvalCalls          = 0;
-    std::uint64_t parityExtraFullEvalCalls         = 0;
-    std::uint64_t parityMismatchFallbackFullCalls  = 0;
-    std::uint64_t parityMismatchRebuildCalls       = 0;
-    std::uint64_t parityMismatchRebuildFails       = 0;
-    std::uint64_t workerEvaluateNs                 = 0;
-    std::uint64_t wrapperEvalNs                    = 0;
-    std::uint64_t evalIncrementalTopMaterializeNs  = 0;
-    std::uint64_t buildNs                          = 0;
-    std::uint64_t advanceMoveNs                    = 0;
-    std::uint64_t advanceNullNs                    = 0;
-    std::uint64_t replayAdvanceMoveCalls           = 0;
-    std::uint64_t replayAdvanceMoveNs              = 0;
-    std::uint64_t replayAdvanceNullCalls           = 0;
-    std::uint64_t replayAdvanceNullNs              = 0;
-    std::uint64_t materializeStackWalkNs           = 0;
-    std::uint64_t replayLoopNs                     = 0;
-    std::uint64_t doMoveNs                         = 0;
-    std::uint64_t doNullMoveNs                     = 0;
-    std::uint64_t undoMoveNs                       = 0;
-    std::uint64_t undoNullMoveNs                   = 0;
-    std::uint64_t parityDirectEvalNs               = 0;
-    PositionMoveProfileMetrics positionMoveProfile{};
-    Eval::NNUEX::RuntimeMetrics runtime{};
-};
-
-enum class NNUEXMode {
-    Full,
-    Incremental,
-    Auto
-};
-
 // Search::Worker is the class that does the actual search.
 // It is instantiated once per thread, and it is responsible for keeping track
 // of the search history, and storing data required for the search.
@@ -366,10 +306,6 @@ class Worker {
     void do_null_move(Position& pos, StateInfo& st, Stack* const ss);
     void undo_move(Position& pos, const Move move);
     void undo_null_move(Position& pos);
-    void refresh_nnuex_option_cache();
-    bool use_nnuex_incremental_stack() const;
-    bool use_nnuex_lazy_incremental_stack() const;
-    bool use_nnuex_metrics() const;
     void reset_nnuex_incremental_stack();
     void push_nnuex_incremental_move(const Position& posAfterMove, Move move, const DirtyPiece& dirtyPiece);
     void push_nnuex_incremental_null(const Position& posAfterNull);
@@ -441,13 +377,6 @@ class Worker {
     static constexpr std::size_t                          nnuexAccumulatorCapacity = std::size_t(MAX_PLY) + 1;
     std::array<NNUEXAccumulatorEntry, nnuexAccumulatorCapacity> nnuexAccumulatorStack{};
     std::size_t                                           nnuexAccumulatorSize = 0;
-    std::uint64_t                                         nnuexParityChecks     = 0;
-    std::uint64_t                                         nnuexParityMismatches = 0;
-    std::uint64_t                                         nnuexParityLogs       = 0;
-    NNUEXMode                                             nnuexModeCached = NNUEXMode::Full;
-    bool                                                  nnuexMetricsEnabledCached     = false;
-    bool                                                  nnuexParityEnabledCached      = false;
-    NNUEXMetrics                                          nnuexMetrics{};
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

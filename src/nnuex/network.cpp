@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -47,8 +46,6 @@ const unsigned int         gEmbeddedNNUEXSize    = 1;
 namespace Stockfish::Eval::NNUEX {
 
 namespace {
-
-using SteadyClock = std::chrono::steady_clock;
 
 constexpr std::uint16_t kReservedStmFeatureIndex = 736;
 constexpr std::uint32_t kExpectedInputSize       = kReservedStmFeatureIndex + 1;
@@ -177,42 +174,7 @@ inline void add_signed_h1_rows_block(__m256i (&acc)[BlockVecCount],
 }
 #endif
 
-#ifndef NNUEX_FIXED_MODE
-thread_local RuntimeMetrics* gRuntimeMetricsSink = nullptr;
-#else
-static constexpr RuntimeMetrics* gRuntimeMetricsSink = nullptr;
-#endif
-
-struct ScopedRuntimeMetricTimer {
-#ifndef NNUEX_FIXED_MODE
-    explicit ScopedRuntimeMetricTimer(std::uint64_t* dst_) : dst(dst_) {
-        if (dst)
-            start = SteadyClock::now();
-    }
-
-    ~ScopedRuntimeMetricTimer() {
-        if (dst)
-            *dst += std::uint64_t(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - start).count());
-    }
-
-    std::uint64_t*          dst   = nullptr;
-    SteadyClock::time_point start = {};
-#else
-    explicit ScopedRuntimeMetricTimer(std::uint64_t*) {}
-#endif
-};
-
 }  // namespace
-
-#ifndef NNUEX_FIXED_MODE
-ScopedRuntimeMetricsBinding::ScopedRuntimeMetricsBinding(RuntimeMetrics* sink) noexcept :
-    prev_(gRuntimeMetricsSink) {
-    gRuntimeMetricsSink = sink;
-}
-
-ScopedRuntimeMetricsBinding::~ScopedRuntimeMetricsBinding() noexcept { gRuntimeMetricsSink = prev_; }
-#endif
 
 // Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
 static int log2_power_of_two(std::int32_t x) {
@@ -1710,14 +1672,8 @@ std::optional<Evaluation> Network::evaluate(const Position& pos) const {
         return std::nullopt;
 
     EncodedFen enc;
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->encodePositionCalls;
-    {
-        ScopedRuntimeMetricTimer encodeTimer(metrics ? &metrics->encodePositionNs : nullptr);
-        if (!encode_position_v2(pos, enc))
-            return std::nullopt;
-    }
+    if (!encode_position_v2(pos, enc))
+        return std::nullopt;
     return evaluate_encoded_alt_direct(*impl_, enc);
 }
 
@@ -2249,48 +2205,32 @@ std::optional<Evaluation> evaluate_encoded_alt_direct(const Network::Impl& impl,
     std::array<std::uint8_t, kExpectedPosH2> posH2{};
     std::array<std::uint8_t, kExpectedPosH3> posH3{};
 
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->buildPreClipCalls;
-    {
-        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->buildPreClipNs : nullptr);
-        if (!build_alt_positional_h1_sparse_exact(impl, enc, nullptr, positionalH1Clip))
-            return std::nullopt;
-    }
+    if (!build_alt_positional_h1_sparse_exact(impl, enc, nullptr, positionalH1Clip))
+        return std::nullopt;
 
     std::int64_t psqtSignedQFt = 0;
     std::int64_t posOutAccQ    = 0;
-    if (metrics)
-        ++metrics->postH1ForwardCalls;
+    std::int64_t psqtUnsignedQFt = std::int64_t(impl.psqtBucketOutputBias[std::size_t(enc.bucket8)]);
+    for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
     {
-        ScopedRuntimeMetricTimer postH1Timer(metrics ? &metrics->postH1ForwardNs : nullptr);
-
-        std::int64_t psqtUnsignedQFt = std::int64_t(impl.psqtBucketOutputBias[std::size_t(enc.bucket8)]);
-        for (std::size_t i = 0; i < enc.activeFeatureCount; ++i)
-        {
-            const std::size_t featureIndex = enc.activeFeatureIndices[i];
-            if (featureIndex == kReservedStmFeatureIndex)
-                continue;
-            psqtUnsignedQFt +=
-              impl.psqtBucketOutputWeight[featureIndex * kPieceBucketCount + std::size_t(enc.bucket8)];
-        }
-        psqtSignedQFt = enc.stmBlack ? -psqtUnsignedQFt : psqtUnsignedQFt;
-
-        dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(positionalH1Clip.data(), posB.h2Weight.data(),
-                                                       posB.h2WeightPacked4.data(), posB.h2Bias.data(),
-                                                       impl.weightScaleHidden, impl.hiddenQuantizedOne,
-                                                       posH2.data());
-        dense_layer_clip_q_fixed_out32<kExpectedPosH2>(posH2.data(), posB.h3Weight.data(),
-                                                       posB.h3WeightPacked4.data(), posB.h3Bias.data(),
-                                                       impl.weightScaleHidden, impl.hiddenQuantizedOne,
-                                                       posH3.data());
-        posOutAccQ = dense_output_acc_q_fixed_32(posH3.data(), impl.positionalOutputWeight.data(),
-                                                 impl.positionalOutputBias, impl.hiddenQuantizedOne);
+        const std::size_t featureIndex = enc.activeFeatureIndices[i];
+        if (featureIndex == kReservedStmFeatureIndex)
+            continue;
+        psqtUnsignedQFt +=
+          impl.psqtBucketOutputWeight[featureIndex * kPieceBucketCount + std::size_t(enc.bucket8)];
     }
+    psqtSignedQFt = enc.stmBlack ? -psqtUnsignedQFt : psqtUnsignedQFt;
 
-    if (metrics)
-        ++metrics->outputConvertCalls;
-    ScopedRuntimeMetricTimer outputConvertTimer(metrics ? &metrics->outputConvertNs : nullptr);
+    dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(positionalH1Clip.data(), posB.h2Weight.data(),
+                                                   posB.h2WeightPacked4.data(), posB.h2Bias.data(),
+                                                   impl.weightScaleHidden, impl.hiddenQuantizedOne,
+                                                   posH2.data());
+    dense_layer_clip_q_fixed_out32<kExpectedPosH2>(posH2.data(), posB.h3Weight.data(),
+                                                   posB.h3WeightPacked4.data(), posB.h3Bias.data(),
+                                                   impl.weightScaleHidden, impl.hiddenQuantizedOne,
+                                                   posH3.data());
+    posOutAccQ = dense_output_acc_q_fixed_32(posH3.data(), impl.positionalOutputWeight.data(),
+                                             impl.positionalOutputBias, impl.hiddenQuantizedOne);
 
     const float psqtNorm = static_cast<float>(double(psqtSignedQFt) / double(impl.psqtFtQuantizedOne));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(impl.outputScale));
@@ -2324,14 +2264,8 @@ bool build_incremental_state_from_encoded(const Network::Impl& impl,
         return false;
     }
 
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->buildPreClipCalls;
-    {
-        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->buildPreClipNs : nullptr);
-        if (!build_alt_positional_h1_sparse_exact(impl, enc, &out.positionalH1Pre, out.positionalH1Clip))
-            return false;
-    }
+    if (!build_alt_positional_h1_sparse_exact(impl, enc, &out.positionalH1Pre, out.positionalH1Clip))
+        return false;
 
     for (std::size_t b = 0; b < kPieceBucketCount; ++b)
         out.psqtBucketAcc[b] = impl.psqtBucketOutputBias[b];
@@ -2381,89 +2315,83 @@ bool advance_incremental_state_from_meta_impl(const Network::Impl&   impl,
 
     const int  nextStmBlack = prev.stmBlack ^ 1;
 
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->advanceMovePreClipCalls;
+    bool ok = false;
+    switch (dirtyPiece.opCount)
     {
-        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceMovePreClipNs : nullptr);
-        bool ok = false;
-        switch (dirtyPiece.opCount)
-        {
-        case 2:
-        {
-            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex)
-                return false;
-
-            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
-            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
-            if (!b0.positionalH1 || !b1.positionalH1)
-                return false;
-
-            ok = fused_positional_h1_update_rows_exact<2>(
-                   prev.positionalH1Pre, {b0.positionalH1, b1.positionalH1}, {-1, +1},
-                   impl.positionalFtQuantizedOne,
-                   impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
-                   next.positionalH1Pre, next.positionalH1Clip)
-              && fused_psqt_bucket_update_rows_exact<2>(
-                   prev.psqtBucketAcc, {b0.psqt8, b1.psqt8}, {-1, +1}, next.psqtBucketAcc);
-            break;
-        }
-        case 3:
-        {
-            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
-                || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex)
-                return false;
-
-            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
-            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
-            const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
-            if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1)
-                return false;
-
-            ok = fused_positional_h1_update_rows_exact<3>(
-                   prev.positionalH1Pre,
-                   {b0.positionalH1, b1.positionalH1, b2.positionalH1}, {-1, -1, +1},
-                   impl.positionalFtQuantizedOne,
-                   impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
-                   next.positionalH1Pre, next.positionalH1Clip)
-              && fused_psqt_bucket_update_rows_exact<3>(
-                   prev.psqtBucketAcc, {b0.psqt8, b1.psqt8, b2.psqt8}, {-1, -1, +1},
-                   next.psqtBucketAcc);
-            break;
-        }
-        case 4:
-        {
-            if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
-                || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex
-                || dirtyPiece.ops[3].featureIndex == InvalidFeatureIndex)
-                return false;
-
-            const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
-            const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
-            const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
-            const auto b3 = compute_feature_bundle(impl, int(dirtyPiece.ops[3].featureIndex));
-            if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1 || !b3.positionalH1)
-                return false;
-
-            ok = fused_positional_h1_update_rows_exact<4>(
-                   prev.positionalH1Pre,
-                   {b0.positionalH1, b1.positionalH1, b2.positionalH1, b3.positionalH1},
-                   {-1, +1, -1, +1},
-                   impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
-                   impl.positionalFtShift, impl.positionalMulhrsK,
-                   next.positionalH1Pre, next.positionalH1Clip)
-              && fused_psqt_bucket_update_rows_exact<4>(
-                   prev.psqtBucketAcc,
-                   {b0.psqt8, b1.psqt8, b2.psqt8, b3.psqt8}, {-1, +1, -1, +1},
-                   next.psqtBucketAcc);
-            break;
-        }
-        default:
+    case 2:
+    {
+        if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex)
             return false;
-        }
-        if (!ok)
+
+        const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+        const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+        if (!b0.positionalH1 || !b1.positionalH1)
             return false;
+
+        ok = fused_positional_h1_update_rows_exact<2>(
+               prev.positionalH1Pre, {b0.positionalH1, b1.positionalH1}, {-1, +1},
+               impl.positionalFtQuantizedOne,
+               impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
+               next.positionalH1Pre, next.positionalH1Clip)
+          && fused_psqt_bucket_update_rows_exact<2>(
+               prev.psqtBucketAcc, {b0.psqt8, b1.psqt8}, {-1, +1}, next.psqtBucketAcc);
+        break;
     }
+    case 3:
+    {
+        if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
+            || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex)
+            return false;
+
+        const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+        const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+        const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
+        if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1)
+            return false;
+
+        ok = fused_positional_h1_update_rows_exact<3>(
+               prev.positionalH1Pre,
+               {b0.positionalH1, b1.positionalH1, b2.positionalH1}, {-1, -1, +1},
+               impl.positionalFtQuantizedOne,
+               impl.hiddenQuantizedOne, impl.positionalFtShift, impl.positionalMulhrsK,
+               next.positionalH1Pre, next.positionalH1Clip)
+          && fused_psqt_bucket_update_rows_exact<3>(
+               prev.psqtBucketAcc, {b0.psqt8, b1.psqt8, b2.psqt8}, {-1, -1, +1},
+               next.psqtBucketAcc);
+        break;
+    }
+    case 4:
+    {
+        if (dirtyPiece.ops[1].featureIndex == InvalidFeatureIndex
+            || dirtyPiece.ops[2].featureIndex == InvalidFeatureIndex
+            || dirtyPiece.ops[3].featureIndex == InvalidFeatureIndex)
+            return false;
+
+        const auto b0 = compute_feature_bundle(impl, int(dirtyPiece.ops[0].featureIndex));
+        const auto b1 = compute_feature_bundle(impl, int(dirtyPiece.ops[1].featureIndex));
+        const auto b2 = compute_feature_bundle(impl, int(dirtyPiece.ops[2].featureIndex));
+        const auto b3 = compute_feature_bundle(impl, int(dirtyPiece.ops[3].featureIndex));
+        if (!b0.positionalH1 || !b1.positionalH1 || !b2.positionalH1 || !b3.positionalH1)
+            return false;
+
+        ok = fused_positional_h1_update_rows_exact<4>(
+               prev.positionalH1Pre,
+               {b0.positionalH1, b1.positionalH1, b2.positionalH1, b3.positionalH1},
+               {-1, +1, -1, +1},
+               impl.positionalFtQuantizedOne, impl.hiddenQuantizedOne,
+               impl.positionalFtShift, impl.positionalMulhrsK,
+               next.positionalH1Pre, next.positionalH1Clip)
+          && fused_psqt_bucket_update_rows_exact<4>(
+               prev.psqtBucketAcc,
+               {b0.psqt8, b1.psqt8, b2.psqt8, b3.psqt8}, {-1, +1, -1, +1},
+               next.psqtBucketAcc);
+        break;
+    }
+    default:
+        return false;
+    }
+    if (!ok)
+        return false;
 
     next.pieceCount = prev.pieceCount + dirtyPiece.pieceCountDelta;
     next.stmBlack   = nextStmBlack;
@@ -2490,13 +2418,6 @@ bool advance_incremental_state_null_from_meta_impl(const Network::Impl&,
     next.positionalH1Clip = prev.positionalH1Clip;
     const int nextStmBlack = prev.stmBlack ^ 1;
 
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
-    if (metrics)
-        ++metrics->advanceNullPreClipCalls;
-    {
-        ScopedRuntimeMetricTimer metricTimer(metrics ? &metrics->advanceNullPreClipNs : nullptr);
-    }
-
     next.stmBlack = nextStmBlack;
     fill_bucket_fields(next.pieceCount, next.stmBlack, next.bucket8, next.bucket16);
     next.key   = nextKey;
@@ -2517,29 +2438,19 @@ std::optional<Evaluation> evaluate_incremental_state_impl(const Network::Impl& i
     std::array<std::uint8_t, kExpectedPosH2> posH2{};
     std::array<std::uint8_t, kExpectedPosH3> posH3{};
 
-    RuntimeMetrics* metrics = gRuntimeMetricsSink;
     std::int64_t    posOutAccQ = 0;
-    if (metrics)
-        ++metrics->postH1ForwardCalls;
-    {
-        ScopedRuntimeMetricTimer postH1Timer(metrics ? &metrics->postH1ForwardNs : nullptr);
-        dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(
-          state.positionalH1Clip.data(), posB.h2Weight.data(), posB.h2WeightPacked4.data(),
-          posB.h2Bias.data(), impl.weightScaleHidden, impl.hiddenQuantizedOne, posH2.data());
-        dense_layer_clip_q_fixed_out32<kExpectedPosH2>(
-          posH2.data(), posB.h3Weight.data(), posB.h3WeightPacked4.data(), posB.h3Bias.data(),
-          impl.weightScaleHidden, impl.hiddenQuantizedOne, posH3.data());
-        posOutAccQ = dense_output_acc_q_fixed_32(posH3.data(), impl.positionalOutputWeight.data(),
-                                                 impl.positionalOutputBias, impl.hiddenQuantizedOne);
-    }
+    dense_layer_clip_q_fixed_out16<kExpectedH1Pos>(
+      state.positionalH1Clip.data(), posB.h2Weight.data(), posB.h2WeightPacked4.data(),
+      posB.h2Bias.data(), impl.weightScaleHidden, impl.hiddenQuantizedOne, posH2.data());
+    dense_layer_clip_q_fixed_out32<kExpectedPosH2>(
+      posH2.data(), posB.h3Weight.data(), posB.h3WeightPacked4.data(), posB.h3Bias.data(),
+      impl.weightScaleHidden, impl.hiddenQuantizedOne, posH3.data());
+    posOutAccQ = dense_output_acc_q_fixed_32(posH3.data(), impl.positionalOutputWeight.data(),
+                                             impl.positionalOutputBias, impl.hiddenQuantizedOne);
 
     const std::int64_t psqtSignedQFt =
       state.stmBlack ? -std::int64_t(state.psqtBucketAcc[std::size_t(state.bucket8)])
                      : std::int64_t(state.psqtBucketAcc[std::size_t(state.bucket8)]);
-
-    if (metrics)
-        ++metrics->outputConvertCalls;
-    ScopedRuntimeMetricTimer outputConvertTimer(metrics ? &metrics->outputConvertNs : nullptr);
 
     const float psqtNorm = static_cast<float>(double(psqtSignedQFt) / double(impl.psqtFtQuantizedOne));
     const float posNorm  = static_cast<float>(double(posOutAccQ) / double(impl.outputScale));

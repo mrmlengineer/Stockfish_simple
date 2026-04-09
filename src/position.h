@@ -70,28 +70,6 @@ struct StateInfo {
 // elements are not invalidated upon list resizing.
 using StateListPtr = std::unique_ptr<std::deque<StateInfo>>;
 
-struct PositionMoveProfileMetrics {
-    std::uint64_t sampledDoMoveCalls   = 0;
-    std::uint64_t stateCopyCalls       = 0;
-    std::uint64_t stateCopyNs          = 0;
-    std::uint64_t checkInfoCalls       = 0;
-    std::uint64_t checkInfoNs          = 0;
-    std::uint64_t repetitionCalls      = 0;
-    std::uint64_t repetitionNs         = 0;
-};
-
-class ScopedPositionMoveProfileBinding {
-   public:
-    explicit ScopedPositionMoveProfileBinding(PositionMoveProfileMetrics* sink) noexcept;
-    ~ScopedPositionMoveProfileBinding() noexcept;
-
-    ScopedPositionMoveProfileBinding(const ScopedPositionMoveProfileBinding&) = delete;
-    ScopedPositionMoveProfileBinding& operator=(const ScopedPositionMoveProfileBinding&) = delete;
-
-   private:
-    PositionMoveProfileMetrics* prev_ = nullptr;
-};
-
 // Position class stores information regarding the board representation as
 // pieces, side to move, hash keys, castling info, etc. Important methods are
 // do_move() and undo_move(), used by the search to update node info when

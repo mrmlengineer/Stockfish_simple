@@ -22,7 +22,6 @@
 #include <array>
 #include <cassert>
 #include <cctype>
-#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <initializer_list>
@@ -44,40 +43,6 @@
 using std::string;
 
 namespace Stockfish {
-
-namespace {
-
-thread_local PositionMoveProfileMetrics* gPositionMoveProfileSink = nullptr;
-
-struct ScopedProfileTimer {
-    explicit ScopedProfileTimer(std::uint64_t* sink) noexcept :
-        sink_(sink),
-        start_(sink ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
-
-    ~ScopedProfileTimer() noexcept {
-        if (!sink_)
-            return;
-        const auto end = std::chrono::steady_clock::now();
-        *sink_ += std::uint64_t(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(end - start_).count());
-    }
-
-   private:
-    std::uint64_t*                         sink_  = nullptr;
-    std::chrono::steady_clock::time_point start_{};
-};
-
-}  // namespace
-
-ScopedPositionMoveProfileBinding::ScopedPositionMoveProfileBinding(
-  PositionMoveProfileMetrics* sink) noexcept :
-    prev_(gPositionMoveProfileSink) {
-    gPositionMoveProfileSink = sink;
-}
-
-ScopedPositionMoveProfileBinding::~ScopedPositionMoveProfileBinding() noexcept {
-    gPositionMoveProfileSink = prev_;
-}
 
 namespace Zobrist {
 
@@ -744,21 +709,12 @@ void Position::do_move(Move                      m,
     assert(m.is_ok());
     assert(&newSt != st);
 
-    PositionMoveProfileMetrics* profile = gPositionMoveProfileSink;
-    if (profile)
-        ++profile->sampledDoMoveCalls;
-
     Key k = st->key ^ Zobrist::side;
 
     // Copy some fields of the old state to our new StateInfo object except the
     // ones which are going to be recalculated from scratch anyway and then switch
     // our state pointer to point to the new (ready to be updated) state.
-    if (profile)
-        ++profile->stateCopyCalls;
-    {
-        ScopedProfileTimer timer(profile ? &profile->stateCopyNs : nullptr);
-        std::memcpy(&newSt, st, offsetof(StateInfo, key));
-    }
+    std::memcpy(&newSt, st, offsetof(StateInfo, key));
     newSt.previous = st;
     st             = &newSt;
 
@@ -960,12 +916,7 @@ void Position::do_move(Move                      m,
     sideToMove = ~sideToMove;
 
     // Update king attacks used for fast check detection
-    if (profile)
-        ++profile->checkInfoCalls;
-    {
-        ScopedProfileTimer timer(profile ? &profile->checkInfoNs : nullptr);
-        set_check_info();
-    }
+    set_check_info();
 
     // Accurate e.p. info is needed for correct zobrist key generation and 3-fold checking
     while (checkEP)
@@ -1028,22 +979,17 @@ void Position::do_move(Move                      m,
     // occurrence of the same position, negative in the 3-fold case, or zero
     // if the position was not repeated.
     st->repetition = 0;
-    if (profile)
-        ++profile->repetitionCalls;
+    int end = std::min(st->rule50, st->pliesFromNull);
+    if (end >= 4)
     {
-        ScopedProfileTimer timer(profile ? &profile->repetitionNs : nullptr);
-        int end = std::min(st->rule50, st->pliesFromNull);
-        if (end >= 4)
+        StateInfo* stp = st->previous->previous;
+        for (int i = 4; i <= end; i += 2)
         {
-            StateInfo* stp = st->previous->previous;
-            for (int i = 4; i <= end; i += 2)
+            stp = stp->previous->previous;
+            if (stp->key == st->key)
             {
-                stp = stp->previous->previous;
-                if (stp->key == st->key)
-                {
-                    st->repetition = stp->repetition ? -i : i;
-                    break;
-                }
+                st->repetition = stp->repetition ? -i : i;
+                break;
             }
         }
     }

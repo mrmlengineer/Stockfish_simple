@@ -174,9 +174,6 @@ class TestCLI(metaclass=OrderedClassMembers):
         output = self.stockfish.process.stdout
 
         assert "option name EvalFile type string default" in output
-        assert "option name NNUEXMode type combo default full incremental auto" in output
-        assert "option name NNUEXParityCheck type check default false" in output
-        assert "option name NNUEXMetrics type check default false" in output
 
 
 class TestInteractive(metaclass=OrderedClassMembers):
@@ -191,20 +188,17 @@ class TestInteractive(metaclass=OrderedClassMembers):
         assert postfix_check(self.stockfish.get_output()) == True
         self.stockfish.clear_output()
 
-    def _configure_nnuex_mode(self, mode: str):
+    def _configure_nnuex(self):
         self.stockfish.send_command("setoption name Threads value 1")
         self.stockfish.send_command("setoption name Hash value 16")
         self.stockfish.send_command("setoption name MultiPV value 1")
         self.stockfish.send_command("setoption name UCI_ShowWDL value false")
-        self.stockfish.send_command("setoption name NNUEXParityCheck value false")
-        self.stockfish.send_command("setoption name NNUEXMetrics value false")
         self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
-        self.stockfish.send_command(f"setoption name NNUEXMode value {mode}")
         self.stockfish.send_command("setoption name Clear Hash")
         self.stockfish.send_command("ucinewgame")
 
-    def _nnuex_eval_signature(self, mode: str, fen: str) -> str:
-        self._configure_nnuex_mode(mode)
+    def _nnuex_eval_signature(self, fen: str) -> str:
+        self._configure_nnuex()
         self.stockfish.send_command(f"position fen {fen}")
         self.stockfish.send_command("eval")
         self.stockfish.send_command("isready")
@@ -225,8 +219,8 @@ class TestInteractive(metaclass=OrderedClassMembers):
         assert signature["final_eval"] is not None
         return signature["final_eval"]
 
-    def _nnuex_search_signature(self, mode: str, fen: str, depth: int) -> tuple[str, str]:
-        self._configure_nnuex_mode(mode)
+    def _nnuex_search_signature(self, fen: str, depth: int) -> tuple[str, str]:
+        self._configure_nnuex()
         self.stockfish.send_command(f"position fen {fen}")
         self.stockfish.send_command(f"go depth {depth}")
 
@@ -428,57 +422,21 @@ class TestInteractive(metaclass=OrderedClassMembers):
         self.stockfish.send_command("go depth 5")
         self.stockfish.starts_with("bestmove")
 
-    def test_nnuex_mode_incremental(self):
-        self.stockfish.send_command("setoption name NNUEXMode value incremental")
+    def test_nnuex_search_runs(self):
         self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
         self.stockfish.send_command("position startpos")
         self.stockfish.send_command("go depth 5")
         self.stockfish.starts_with("bestmove")
-        self.stockfish.send_command("setoption name NNUEXMode value full")
 
-    def test_nnuex_mode_auto(self):
-        self.stockfish.send_command("setoption name NNUEXMode value auto")
-        self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
-        self.stockfish.send_command("position startpos")
-        self.stockfish.send_command("go depth 5")
-        self.stockfish.starts_with("bestmove")
-        self.stockfish.send_command("setoption name NNUEXMode value full")
-
-    def test_nnuex_modes_match_eval_and_search(self):
+    def test_nnuex_eval_and_search_are_stable(self):
         fen = "r1bq1rk1/ppp2ppp/2n5/3np3/2B5/2PP1N2/PP3PPP/RNBQ1RK1 w - - 0 8"
-        modes = ("full", "incremental", "auto")
+        eval_signature_a = self._nnuex_eval_signature(fen)
+        eval_signature_b = self._nnuex_eval_signature(fen)
+        search_signature_a = self._nnuex_search_signature(fen, depth=6)
+        search_signature_b = self._nnuex_search_signature(fen, depth=6)
 
-        eval_signatures = {
-            mode: self._nnuex_eval_signature(mode, fen)
-            for mode in modes
-        }
-        search_signatures = {
-            mode: self._nnuex_search_signature(mode, fen, depth=6)
-            for mode in modes
-        }
-
-        reference_eval = eval_signatures["full"]
-        reference_search = search_signatures["full"]
-
-        for mode in modes[1:]:
-            assert eval_signatures[mode] == reference_eval
-            assert search_signatures[mode] == reference_search
-
-        self.stockfish.send_command("setoption name NNUEXMode value full")
-
-    def test_nnuex_parity_and_metrics(self):
-        self.stockfish.send_command(f"setoption name EvalFile value {DEFAULT_NNUEX_FILE}")
-        self.stockfish.send_command("setoption name NNUEXMode value incremental")
-        self.stockfish.send_command("setoption name NNUEXParityCheck value true")
-        self.stockfish.send_command("setoption name NNUEXMetrics value true")
-        self.stockfish.send_command("position startpos")
-        self.stockfish.send_command("go depth 3")
-        self.stockfish.contains("info string NNUEX incremental parity summary")
-        self.stockfish.contains("info string NNUEX metrics summary")
-        self.stockfish.starts_with("bestmove")
-        self.stockfish.send_command("setoption name NNUEXParityCheck value false")
-        self.stockfish.send_command("setoption name NNUEXMetrics value false")
-        self.stockfish.send_command("setoption name NNUEXMode value full")
+        assert eval_signature_a == eval_signature_b
+        assert search_signature_a == search_signature_b
 
     def test_multipv_setting(self):
         self.stockfish.send_command("setoption name MultiPV value 4")

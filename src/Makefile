@@ -174,10 +174,7 @@ lasx = no
 STRIP = strip
 
 # NNUEX build options
-# nnuex_runtime_options = yes/no  (default: yes)
-#   When "no", compiles with -DNNUEX_FIXED_MODE: removes NNUEXMode/NNUEXMetrics/
-#   NNUEXParityCheck UCI options, fixes mode to auto at compile time.
-nnuex_runtime_options = yes
+# The NNUEX runtime is fixed to the production auto path.
 # EVALFILE = <path>  (optional)
 #   Path to the .nnuex file to embed in the binary via incbin.
 #   The file is copied to the src directory before compilation.
@@ -192,8 +189,8 @@ NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; p
 # Must match the EvalFileDefaultNameNNUEX macro in nnuex/network.h (used by incbin).
 NNUEX_DEFAULT_NAME = export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex
 NNUEX_CONFIG_STAMP = .nnuex-build-config
-NNUEX_BUILD_SIGNATURE = nnuex_runtime_options=$(nnuex_runtime_options);EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
-# NNUEX_H1_POSITIONAL and NNUEX_FIXED_MODE are injected via CXXFLAGS, so any
+NNUEX_BUILD_SIGNATURE = EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
+# NNUEX_H1_POSITIONAL is injected via CXXFLAGS, so any
 # configuration change can invalidate every translation unit, not just the
 # obvious NNUEX runtime objects.
 NNUEX_CONFIG_OBJS = $(OBJS)
@@ -682,9 +679,6 @@ else
 endif
 
 ### 3.2.1b NNUEX build options
-ifeq ($(nnuex_runtime_options),no)
-	CXXFLAGS += -DNNUEX_FIXED_MODE
-endif
 CXXFLAGS += -DNNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 ifeq ($(EVALFILE),)
 	CXXFLAGS += -DNNUE_EMBEDDING_OFF
@@ -997,8 +991,6 @@ help:
 	echo "NNUEX options:" && \
 	echo "" && \
 	echo "EVALFILE=<path>                > Embed the given .nnuex network in the binary" && \
-	echo "nnuex_runtime_options=yes/no   > yes (default): UCI knobs for mode/metrics/parity" && \
-	echo "                               > no: fixed auto mode, no debug UCI options" && \
 	echo ""
 ifneq ($(SUPPORTED_ARCH), true)
 	@echo "Specify a supported architecture with the ARCH option for more details"
@@ -1121,7 +1113,6 @@ config-sanity:
 	echo "lsx: '$(lsx)'" && \
 	echo "lasx: '$(lasx)'" && \
 	echo "target_windows: '$(target_windows)'" && \
-	echo "nnuex_runtime_options: '$(nnuex_runtime_options)'" && \
 	echo "EVALFILE: '$(EVALFILE)'" && \
 	echo "NNUEX_H1_POSITIONAL: '$(NNUEX_H1_POSITIONAL)'" && \
 	echo "" && \

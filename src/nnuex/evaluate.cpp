@@ -15,15 +15,14 @@
 
 namespace Stockfish::Eval::NNUEX {
 
-Value evaluate(const Network& net, const Position& pos, int optimism, bool incrementalRequested) {
-    return evaluate(net, pos, nullptr, optimism, incrementalRequested);
+Value evaluate(const Network& net, const Position& pos, int optimism) {
+    return evaluate(net, pos, nullptr, optimism);
 }
 
 Value evaluate(const Network&          net,
                const Position&         pos,
                const IncrementalState* incrementalState,
-               int                     optimism,
-               bool                    /*incrementalRequested*/) {
+               int                     optimism) {
     auto out = incrementalState ? net.evaluate(*incrementalState) : net.evaluate(pos);
     if (!out.has_value())
         return detail::fallback_simple_eval(pos);
@@ -46,7 +45,7 @@ std::string trace(Position& pos, const Network& net) {
     Value psqt       = out->psqt;
     Value positional = out->positional;
     Value nnue       = (125 * psqt + 131 * positional) / 128;
-    Value final      = evaluate(net, pos, VALUE_ZERO, false);
+    Value final      = evaluate(net, pos, VALUE_ZERO);
 
     Value psqtW  = pos.side_to_move() == WHITE ? psqt : -psqt;
     Value posW   = pos.side_to_move() == WHITE ? positional : -positional;
