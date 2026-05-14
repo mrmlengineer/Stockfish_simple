@@ -60,8 +60,11 @@ constexpr std::uint32_t kExpectedPosH3       = 32;
 constexpr std::uint32_t kExpectedOutputs     = 2;
 constexpr std::size_t   kMaxActiveFeatures   = 32;  // board-piece features only; STM is bucket-only
 constexpr std::size_t   kPieceBucketCount    = 8;
+constexpr std::int32_t  kMaxPackedHiddenQuantizedOne = 127;
 
 static_assert((NNUEX_H1_POSITIONAL % 16) == 0, "NNUEX_H1_POSITIONAL must be divisible by 16");
+static_assert(kMaxPackedHiddenQuantizedOne <= 127,
+              "NNUEX packed maddubs kernels require q127-safe hidden activations");
 
 constexpr std::uint32_t kExpectedFeatureVariantId = 2;
 constexpr std::uint32_t kExpectedBucketSchemeId   = 1;
@@ -758,9 +761,11 @@ bool validate_header_scaling(const Header& h, std::string& err) {
         err = "NNUEX header contains invalid ftQuantizedOne";
         return false;
     }
-    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, 255, hiddenQuantizedOne))
+    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, kMaxPackedHiddenQuantizedOne,
+                                      hiddenQuantizedOne))
     {
-        err = "NNUEX header contains invalid hiddenQuantizedOne";
+        err = "NNUEX header contains invalid or unsupported hiddenQuantizedOne; "
+              "packed runtime requires hiddenQuantizedOne <= 127";
         return false;
     }
     if (!try_round_positive_i32_scale(h.weightScaleHidden, std::numeric_limits<std::int32_t>::max(),
@@ -812,9 +817,11 @@ bool cache_validated_runtime_scaling(const Header& h,
             return false;
         }
     }
-    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, 255, hiddenQuantizedOne))
+    if (!try_round_positive_i32_scale(h.hiddenQuantizedOne, kMaxPackedHiddenQuantizedOne,
+                                      hiddenQuantizedOne))
     {
-        err = "NNUEX header contains invalid hiddenQuantizedOne";
+        err = "NNUEX header contains invalid or unsupported hiddenQuantizedOne; "
+              "packed runtime requires hiddenQuantizedOne <= 127";
         return false;
     }
     if (!try_round_positive_i32_scale(h.weightScaleHidden, std::numeric_limits<std::int32_t>::max(),

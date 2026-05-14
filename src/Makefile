@@ -190,6 +190,7 @@ NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; p
 NNUEX_DEFAULT_NAME = export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex
 NNUEX_STAGED_FILE = $(NNUEX_DEFAULT_NAME)
 NNUEX_SOURCE_FILE = $(if $(EVALFILE),$(abspath $(EVALFILE)))
+NNUEX_MAX_PACKED_HIDDEN_QUANTIZED_ONE = 127
 NNUEX_CONFIG_STAMP = .nnuex-build-config
 NNUEX_BUILD_SIGNATURE = EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 # NNUEX_H1_POSITIONAL is injected via CXXFLAGS, so any
@@ -1086,6 +1087,7 @@ $(NNUEX_CONFIG_OBJS): $(NNUEX_CONFIG_STAMP)
 ifneq ($(EVALFILE),)
 $(NNUEX_STAGED_FILE): $(NNUEX_SOURCE_FILE) FORCE
 	@echo "Staging NNUEX network for embedding: $(EVALFILE)"
+	@python3 -c "import math,struct,sys; path=sys.argv[1]; max_q=float(sys.argv[2]); data=open(path,'rb').read(100); hidden=struct.unpack_from('<f', data, 96)[0] if len(data) >= 100 else float('nan'); ok=math.isfinite(hidden) and 0.0 < hidden <= max_q; sys.exit(f'Unsupported NNUEX hiddenQuantizedOne={hidden!r} in {path}; packed runtime requires hiddenQuantizedOne <= {int(max_q)}') if not ok else None" "$(NNUEX_SOURCE_FILE)" "$(NNUEX_MAX_PACKED_HIDDEN_QUANTIZED_ONE)"
 	@mkdir -p "$(dir $@)"
 	@if test -f "$@" && cmp -s "$<" "$@"; then :; else cp "$<" "$@"; fi
 
