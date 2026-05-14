@@ -15,6 +15,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <type_traits>
@@ -61,6 +62,7 @@ constexpr std::uint32_t kExpectedOutputs     = 2;
 constexpr std::size_t   kMaxActiveFeatures   = 32;  // board-piece features only; STM is bucket-only
 constexpr std::size_t   kPieceBucketCount    = 8;
 constexpr std::int32_t  kMaxPackedHiddenQuantizedOne = 127;
+constexpr std::size_t   kNnuexCacheLineSize = 64;
 
 static_assert((NNUEX_H1_POSITIONAL % 16) == 0, "NNUEX_H1_POSITIONAL must be divisible by 16");
 static_assert(kMaxPackedHiddenQuantizedOne <= 127,
@@ -178,6 +180,47 @@ inline void add_signed_h1_rows_block(__m256i (&acc)[BlockVecCount],
 #endif
 
 }  // namespace
+
+template<typename T, std::size_t Alignment>
+struct AlignedAllocator {
+    static_assert((Alignment & (Alignment - 1)) == 0, "Alignment must be a power of two");
+    static_assert(Alignment >= alignof(T), "Alignment must satisfy the value type alignment");
+
+    using value_type = T;
+
+    AlignedAllocator() noexcept = default;
+
+    template<typename U>
+    AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+
+    [[nodiscard]] T* allocate(std::size_t n) {
+        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T))
+            std::abort();
+        return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t(Alignment)));
+    }
+
+    void deallocate(T* p, std::size_t) noexcept {
+        ::operator delete(p, std::align_val_t(Alignment));
+    }
+
+    template<typename U>
+    struct rebind {
+        using other = AlignedAllocator<U, Alignment>;
+    };
+};
+
+template<typename T, typename U, std::size_t Alignment>
+bool operator==(const AlignedAllocator<T, Alignment>&, const AlignedAllocator<U, Alignment>&) {
+    return true;
+}
+
+template<typename T, typename U, std::size_t Alignment>
+bool operator!=(const AlignedAllocator<T, Alignment>&, const AlignedAllocator<U, Alignment>&) {
+    return false;
+}
+
+template<typename T>
+using CacheLineAlignedVector = std::vector<T, AlignedAllocator<T, kNnuexCacheLineSize>>;
 
 // Compute floor(log2(x)) for positive power-of-two x; returns 0 if not a power of two.
 static int log2_power_of_two(std::int32_t x) {
@@ -1232,8 +1275,8 @@ bool read_scaled_array(ByteReader& rd, std::size_t count, float scale, std::vect
     return true;
 }
 
-template<typename IntT>
-bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT>& out) {
+template<typename IntT, typename Allocator>
+bool read_raw_array(ByteReader& rd, std::size_t count, std::vector<IntT, Allocator>& out) {
     out.resize(count);
     for (std::size_t i = 0; i < count; ++i)
     {
@@ -1386,10 +1429,10 @@ struct Network::Impl {
 
     std::array<BucketLayers<kExpectedH1Pos, kExpectedPosH2, kExpectedPosH3>, kExpectedBucketCount>
       positionalBuckets{};
-    std::vector<std::int16_t>                             psqtBucketOutputWeight;
-    std::vector<std::int16_t>                             psqtBucketOutputBias;
-    std::vector<std::int16_t>                             positionalHidden1Weight;
-    std::vector<std::int16_t>                             positionalHidden1Bias;
+    CacheLineAlignedVector<std::int16_t>                  psqtBucketOutputWeight;
+    CacheLineAlignedVector<std::int16_t>                  psqtBucketOutputBias;
+    CacheLineAlignedVector<std::int16_t>                  positionalHidden1Weight;
+    CacheLineAlignedVector<std::int16_t>                  positionalHidden1Bias;
     alignas(32) std::array<std::int8_t, kExpectedPosH3> positionalOutputWeight{};
     std::int32_t                                         positionalOutputBias = 0;
 };
