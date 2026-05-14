@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -313,6 +314,17 @@ void UCIEngine::benchmark(std::istream& args) {
     setoption(ss);
     ss = std::istringstream("name UCI_Chess960 value false");
     setoption(ss);
+
+    if (!engine.nnuex_is_loaded())
+    {
+        std::cerr << "\nERROR: NNUEX network is not loaded; refusing to run " << BenchmarkCommand
+                  << " benchmark because results would use fallback_simple_eval().";
+        const std::string error = engine.nnuex_load_error();
+        if (!error.empty())
+            std::cerr << "\n" << error;
+        std::cerr << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
 
     // Warmup
     for (const auto& cmd : setup.commands)

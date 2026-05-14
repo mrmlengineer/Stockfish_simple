@@ -253,6 +253,10 @@ void Engine::verify_networks() const {
         onVerifyNetworks("NNUEX replication: NUMA-local lazy replicas (non-shared-memory path).");
 }
 
+bool Engine::nnuex_is_loaded() const { return nnuex->is_initialized(); }
+
+std::string Engine::nnuex_load_error() const { return nnuex->last_error(); }
+
 void Engine::load_networks() {
     nnuex.modify_and_replicate(
       [this](NNUEX::Network& net) { net.load(binaryDirectory, options["EvalFile"]); });

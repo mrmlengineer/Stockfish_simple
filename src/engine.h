@@ -86,6 +86,8 @@ class Engine {
     // network related
 
     void verify_networks() const;
+    bool nnuex_is_loaded() const;
+    std::string nnuex_load_error() const;
     void load_networks();
     void load_network(const std::string& file);
 
