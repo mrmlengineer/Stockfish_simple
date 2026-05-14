@@ -188,12 +188,17 @@ EVALFILE ?= ../../export/custom_dual_head_four_phase_reference_training_no_stm_n
 NNUEX_H1_POSITIONAL ?= $(if $(EVALFILE),$(shell python3 -c "import struct,sys; print(struct.unpack_from('<I', open(sys.argv[1], 'rb').read(52), 48)[0])" "$(abspath $(EVALFILE))"),384)
 # Must match the EvalFileDefaultNameNNUEX macro in nnuex/network.h (used by incbin).
 NNUEX_DEFAULT_NAME = export/custom_dual_head_four_phase_reference_training_no_stm_no_paoir_reg_h1pos384/export.nnuex
+NNUEX_STAGED_FILE = $(NNUEX_DEFAULT_NAME)
+NNUEX_SOURCE_FILE = $(if $(EVALFILE),$(abspath $(EVALFILE)))
 NNUEX_CONFIG_STAMP = .nnuex-build-config
 NNUEX_BUILD_SIGNATURE = EVALFILE=$(if $(EVALFILE),$(abspath $(EVALFILE)),<none>);NNUEX_H1_POSITIONAL=$(NNUEX_H1_POSITIONAL)
 # NNUEX_H1_POSITIONAL is injected via CXXFLAGS, so any
 # configuration change can invalidate every translation unit, not just the
 # obvious NNUEX runtime objects.
 NNUEX_CONFIG_OBJS = $(OBJS)
+ifneq ($(EVALFILE),)
+NNUEX_EMBED_OBJS = nnuex/network.o
+endif
 
 ifneq ($(shell which clang-format-20 2> /dev/null),)
 	CLANG-FORMAT = clang-format-20
@@ -1057,12 +1062,10 @@ profileclean:
 
 # evaluation network (nnuex)
 # If EVALFILE is set, copy it to the src directory so incbin can embed it.
-net:
 ifneq ($(EVALFILE),)
-	@echo "Staging NNUEX network for embedding: $(EVALFILE)"
-	@mkdir -p "$(dir $(NNUEX_DEFAULT_NAME))"
-	@cp "$(EVALFILE)" "$(NNUEX_DEFAULT_NAME)"
+net: $(NNUEX_STAGED_FILE)
 else
+net:
 	@echo "No EVALFILE set. The binary will attempt to load the network from disk at runtime."
 	@echo "To embed: make build EVALFILE=path/to/network.nnuex"
 endif
@@ -1079,6 +1082,15 @@ $(NNUEX_CONFIG_STAMP): FORCE
 	@if test -f $@ && cmp -s $@ $@.tmp; then rm -f $@.tmp; else mv -f $@.tmp $@; fi
 
 $(NNUEX_CONFIG_OBJS): $(NNUEX_CONFIG_STAMP)
+
+ifneq ($(EVALFILE),)
+$(NNUEX_STAGED_FILE): $(NNUEX_SOURCE_FILE) FORCE
+	@echo "Staging NNUEX network for embedding: $(EVALFILE)"
+	@mkdir -p "$(dir $@)"
+	@if test -f "$@" && cmp -s "$<" "$@"; then :; else cp "$<" "$@"; fi
+
+$(NNUEX_EMBED_OBJS): $(NNUEX_STAGED_FILE)
+endif
 
 all: net $(EXE) .depend
 
